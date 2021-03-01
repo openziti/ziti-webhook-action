@@ -1,0 +1,33 @@
+{
+  "name": "ziti-webhook-action",
+  "version": "1.0.0",
+  "description": "POST a Webhook over a Ziti network",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "ncc build index.js --license LICENSE",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/smilindave26/ziti-test-action.git"
+  },
+  "keywords": [
+    "actions",
+    "ziti",
+    "webhook"
+  ],
+  "author": {
+    "name": "NetFoundry",
+    "url": "http://netfoundry.io"
+  },
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/openziti/ziti-webhook-action/issues"
+  },
+  "homepage": "https://github.com/openziti/ziti-webhook-action#readme",
+  "dependencies": {
+    "@actions/core": "^1.2.6",
+    "@actions/github": "^4.0.0",
+    "ziti-sdk-nodejs": "^0.2.3"
+  }
+}

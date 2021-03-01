@@ -1,0 +1,15 @@
+name: 'Ziti Webhook Action'
+description: 'POST a Webhook over a Ziti network'
+inputs:
+  ziti-id:
+    description: 'Identity JSON for an enrolled Ziti endpoint'
+    required: true
+  webhook-url:
+    description: 'URL for posting the payload'
+    required: true
+  webhook-secret:
+    description: 'Secret for signature hash'
+    required: true
+runs:
+  using: 'node12'
+  main: 'dist/index.js'
