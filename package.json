@@ -9,7 +9,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/smilindave26/ziti-test-action.git"
+    "url": "git+https://github.com/openziti/ziti-webhook-action.git"
   },
   "keywords": [
     "actions",
