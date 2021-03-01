@@ -47,7 +47,7 @@ const zitiHttpRequest = async (url, method, headers) => {
       },        
       (obj) => { // on_resp callback
         console.log(`on_resp status: ${obj.code} ${obj.status}`);
-        if (obj.code < 0) {
+        if (obj.code != 200) {
           core.setFailed(`on_resp failure: ${obj.status}`);
           process.exit(-1);
         }
@@ -71,7 +71,7 @@ const zitiHttpRequest = async (url, method, headers) => {
 
         // TODO: keep running count of content-length to see if done?
         // for a webhook we don't care much, so just exit
-        process.exit(0);
+        //process.exit(0);
       });
   });
 };
@@ -147,6 +147,7 @@ console.log('Going async...');
       core.setFailed(`Ziti_http_request_data failed: ${err}`);
       process.exit(-1);
     });
+    ziti.Ziti_http_request_end(req);
 
   } catch (error) {
     core.setFailed(error.message);
