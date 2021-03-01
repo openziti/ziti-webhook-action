@@ -70,6 +70,7 @@ const zitiHttpRequest = async (url, method, headers) => {
         }
 
         // TODO: keep running count of content-length to see if done?
+        // for a webhook we don't care much, so just exit
         process.exit(0);
       });
   });
@@ -124,7 +125,7 @@ console.log('Going async...');
 
     // Sign the payload
     let sig = "sha1=" + crypto.createHmac('sha1', webhookSecret).update(payload).digest('hex');
-    console.log(`Sig: ${sig}`);
+    //console.log(`Sig: ${sig}`);
 
     // Send it over Ziti
     let headersArray = [
@@ -135,21 +136,17 @@ console.log('Going async...');
       `X-GitHub-Event: ${github.context.eventName}`
     ];
 
-    console.log('sending request header')
     let req = await zitiHttpRequest(webhookUrl, 'POST',headersArray).catch((err) => {
       console.log('error sending request header');
       core.setFailed(`Ziti_http_request failed: ${err}`);
       process.exit(-1);
     });
-    console.log('sent request header');
-    console.log("Ziti_http_request results: %o", req);
 
     // Send the payload
     results = await zitiHttpRequestData(req, payload).catch((err) => {
       core.setFailed(`Ziti_http_request_data failed: ${err}`);
       process.exit(-1);
     });
-    console.log("Ziti_http_request_data results: %o", results);
 
   } catch (error) {
     core.setFailed(error.message);
