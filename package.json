@@ -1,6 +1,6 @@
 {
   "name": "ziti-webhook-action",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "POST a Webhook over a Ziti network",
   "main": "dist/index.js",
   "scripts": {
