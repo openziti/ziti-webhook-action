@@ -58,6 +58,7 @@ const zitiHttpRequest = async (url, method, headers) => {
           core.setFailed(`on_resp failure: ${obj.status}`);
           process.exit(-1);
         }
+        process.exit(0);
       },
       (obj) => { // on_resp_body callback
         // not expecting any body...
@@ -75,10 +76,6 @@ const zitiHttpRequest = async (url, method, headers) => {
         } else {
           console.log(`on_resp_body len: ${obj.len}`);
         }
-
-        // TODO: keep running count of content-length to see if done?
-        // for a webhook we don't care much, so just exit
-        //process.exit(0);
       });
   });
 };
@@ -133,7 +130,7 @@ console.log('Going async...');
     // Sign the payload
     let sig = "sha1=" + crypto.createHmac('sha1', webhookSecret).update(payload).digest('hex');
     let sig256 = "sha256=" + crypto.createHmac('sha256', webhookSecret).update(payload).digest('hex');
-    const hookshot = 'ziti-webhook-action'
+    const hookshot = 'ziti-webhook-action';
     const { v4: uuidv4 } = __nccwpck_require__(8741);
     const guid = uuidv4(); 
 
@@ -149,7 +146,6 @@ console.log('Going async...');
     ];
 
     let req = await zitiHttpRequest(webhookUrl, 'POST',headersArray).catch((err) => {
-      console.log('error sending request header');
       core.setFailed(`Ziti_http_request failed: ${err}`);
       process.exit(-1);
     });
