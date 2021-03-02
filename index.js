@@ -125,14 +125,20 @@ console.log('Going async...');
 
     // Sign the payload
     let sig = "sha1=" + crypto.createHmac('sha1', webhookSecret).update(payload).digest('hex');
-    //console.log(`Sig: ${sig}`);
+    let sig256 = "sha256=" + crypto.createHmac('sha256', webhookSecret).update(payload).digest('hex');
+    const hookshot = '7657ada'; // TODO
+    const { v4: uuidv4 } = require('uuid');
+    const guid = uuidv4(); 
+    console.log(`X-GitHub-Delivery: ${guid}`);
 
     // Send it over Ziti
     let headersArray = [
-      'User-Agent: GitHub-Hookshot/7abb35b',
+      `User-Agent: GitHub-Hookshot/${hookshot}`, 
       'Content-Type: application/json',
+      `X-GitHub-Delivery: ${guid}`,
       `Content-Length: ${payload.length}`,
       `X-Hub-Signature: ${sig}`,
+      `X-Hub-Signature-256: ${sig256}`,
       `X-GitHub-Event: ${github.context.eventName}`
     ];
 
