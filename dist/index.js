@@ -128,7 +128,7 @@ console.log('Going async...');
 
     // Get the JSON webhook payload for the event that triggered the workflow
     const payload = JSON.stringify(github.context.payload, undefined, 2)
-    //console.log(`The event payload: ${payload}`);
+    console.log(`The event payload: ${payload}`);
 
     // Sign the payload
     let sig = "sha1=" + crypto.createHmac('sha1', webhookSecret).update(payload).digest('hex');
