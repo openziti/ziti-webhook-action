@@ -121,15 +121,14 @@ console.log('Going async...');
 
     // Get the JSON webhook payload for the event that triggered the workflow
     const payload = JSON.stringify(github.context.payload, undefined, 2)
-    console.log(`The event payload: ${payload}`);
+    //console.log(`The event payload: ${payload}`);
 
     // Sign the payload
     let sig = "sha1=" + crypto.createHmac('sha1', webhookSecret).update(payload).digest('hex');
     let sig256 = "sha256=" + crypto.createHmac('sha256', webhookSecret).update(payload).digest('hex');
-    const hookshot = '7657ada'; // TODO
+    const hookshot = 'ziti-webhook-action'
     const { v4: uuidv4 } = require('uuid');
     const guid = uuidv4(); 
-    console.log(`X-GitHub-Delivery: ${guid}`);
 
     // Send it over Ziti
     let headersArray = [
