@@ -30,6 +30,10 @@ jobs:
 
     - name: Push Dist
       if: github.ref != 'refs/heads/main'
-      uses: actions-x/commit@v2
+      uses: EndBug/add-and-commit@v7
       with:
-        files: ./dist
+        author_name: github-actions
+        author_email: 41898282+github-actions[bot]@users.noreply.github.com
+        add: ./dist
+        pull_strategy: NO-PULL
+        push: true
