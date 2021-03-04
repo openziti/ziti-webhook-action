@@ -9,7 +9,7 @@ on: [ push ]
 
 jobs:
   ziti-action:
-    # Currently runs on ubuntu or macos
+    # Currently only runs on macos
     runs-on: macos-latest
     name: Test Webhook Action
     steps:
