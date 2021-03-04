@@ -24,7 +24,7 @@ jobs:
 
     - name: Build
       run: |
-        npi install -g @vercel/ncc
+        npm install -g @vercel/ncc
         npm install
         npm run build
 
