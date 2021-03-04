@@ -9,7 +9,7 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
-          - macOS-latest
+          - macos-latest
 
     steps:
     - name: Checkout Project
@@ -28,12 +28,12 @@ jobs:
         npm install
         npm run build
 
-    - name: Push Dist
-      if: github.ref != 'refs/heads/main'
-      uses: EndBug/add-and-commit@v7
-      with:
-        author_name: github-actions
-        author_email: 41898282+github-actions[bot]@users.noreply.github.com
-        add: ./dist ./dist/build/Release
-        pull_strategy: NO-PULL
-        push: true
+    # - name: Push Dist
+      # if: github.ref != 'refs/heads/main'
+      # uses: EndBug/add-and-commit@v7
+      # with:
+        # author_name: github-actions
+        # author_email: 41898282+github-actions[bot]@users.noreply.github.com
+        # add: ./dist
+        # pull_strategy: NO-PULL
+        # push: true
