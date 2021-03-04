@@ -169,13 +169,13 @@ console.log('Going async...');
     ];
 
     let req = await zitiHttpRequest(webhookUrl, 'POST',headersArray).catch((err) => {
-      core.setFailed(`Ziti_http_request failed: ${err}`);
+      core.setFailed(`zitiHttpRequest failed: ${err}`);
       process.exit(-1);
     });
 
     // Send the payload
     results = await zitiHttpRequestData(req, payload).catch((err) => {
-      core.setFailed(`Ziti_http_request_data failed: ${err}`);
+      core.setFailed(`zitiHttpRequestData failed: ${err}`);
       process.exit(-1);
     });
     ziti.Ziti_http_request_end(req);
