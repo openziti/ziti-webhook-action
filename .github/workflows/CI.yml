@@ -34,6 +34,6 @@ jobs:
       with:
         author_name: github-actions
         author_email: 41898282+github-actions[bot]@users.noreply.github.com
-        add: ./dist
+        add: ./dist ./dist/build/Release
         pull_strategy: NO-PULL
         push: true
