@@ -11,7 +11,7 @@ jobs:
   ziti-action:
     # Currently only runs on macos
     runs-on: macos-latest
-    name: Test Webhook Action
+    name: Ziti Webhook Action
     steps:
     - uses: openziti/ziti-webhook-action@main
       with:
@@ -27,3 +27,8 @@ jobs:
         # to be set in the X-Hub-Signature HTTP header
         webhook-secret: ${{ secrets.ZITI_WEBHOOK_SECRET }}
 ```
+## Ziti Identity
+
+The `ziti-id` input is the JSON formmatted string of an identity enrolled  in a `Ziti` netowrk.
+
+The identity can be created by enrolling via the `ziti edge enroll path/to/jwt [flags]` command.  The `ziti` executable can be obtained [here](https://github.com/openziti/ziti/releases/latest).
