@@ -1,5 +1,8 @@
 name: 'Ziti Webhook Action'
 description: 'POST a Webhook over a Ziti network'
+branding:
+  icon: 'zap'  
+  color: 'red'
 inputs:
   ziti-id:
     description: 'Identity JSON for an enrolled Ziti endpoint'
