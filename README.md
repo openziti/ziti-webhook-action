@@ -1,6 +1,6 @@
 # Ziti Webhook Action
 
-This GitHub workflow action uses [Ziti NodeJS SDK](https://github.com/openziti/ziti-sdk-nodejs) posts the event's `payload` in JSON format over a `Ziti` connection.  
+This GitHub workflow action uses [Ziti NodeJS SDK](https://github.com/openziti/ziti-sdk-nodejs) to post an event's `payload` in JSON format over a `Ziti` connection.  
 
 ## Usage
 ```yml
@@ -29,6 +29,6 @@ jobs:
 ```
 ## Ziti Identity
 
-The `ziti-id` input is the JSON formmatted string of an identity enrolled  in a `Ziti` netowrk.
+The `ziti-id` input is the JSON formatted string of an identity enrolled  in a `Ziti` netowrk.
 
 The identity can be created by enrolling via the `ziti edge enroll path/to/jwt [flags]` command.  The `ziti` executable can be obtained [here](https://github.com/openziti/ziti/releases/latest).
