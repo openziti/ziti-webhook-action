@@ -73,8 +73,7 @@ const zitiHttpRequest = async (url, method, headers) => {
   });
 };
 
-const zitiHttpRequestData = async (req, payload) => {
-  var buf = Buffer.from(payload, 'utf8');
+const zitiHttpRequestData = async (req, buf) => {
   ziti.Ziti_http_request_data(
     req, 
     buf,
@@ -118,11 +117,12 @@ console.log('Going async...');
 
     // Get the JSON webhook payload for the event that triggered the workflow
     const payload = JSON.stringify(github.context.payload, undefined, 2)
+    var payloadBuf = Buffer.from(payload, 'utf8');
     //console.log(`The event payload: ${payload}`);
 
     // Sign the payload
-    let sig = "sha1=" + crypto.createHmac('sha1', webhookSecret).update(payload).digest('hex');
-    let sig256 = "sha256=" + crypto.createHmac('sha256', webhookSecret).update(payload).digest('hex');
+    let sig = "sha1=" + crypto.createHmac('sha1', webhookSecret).update(payloadBuf).digest('hex');
+    let sig256 = "sha256=" + crypto.createHmac('sha256', webhookSecret).update(payloadBuf).digest('hex');
     const hookshot = 'ziti-webhook-action';
     const { v4: uuidv4 } = require('uuid');
     const guid = uuidv4(); 
@@ -132,7 +132,7 @@ console.log('Going async...');
       `User-Agent: GitHub-Hookshot/${hookshot}`, 
       'Content-Type: application/json',
       `X-GitHub-Delivery: ${guid}`,
-      `Content-Length: ${payload.length}`,
+      `Content-Length: ${payloadBuf.length}`,
       `X-Hub-Signature: ${sig}`,
       `X-Hub-Signature-256: ${sig256}`,
       `X-GitHub-Event: ${github.context.eventName}`
@@ -144,7 +144,7 @@ console.log('Going async...');
     });
 
     // Send the payload
-    results = await zitiHttpRequestData(req, payload).catch((err) => {
+    results = await zitiHttpRequestData(req, payloadBuf).catch((err) => {
       core.setFailed(`zitiHttpRequestData failed: ${err}`);
       process.exit(-1);
     });
