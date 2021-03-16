@@ -144,7 +144,7 @@ console.log('Going async...');
     });
 
     // Send the payload
-    results = await zitiHttpRequestData(req, payload).catch((err) => {
+    results = await zitiHttpRequestData(req, payloadBuf).catch((err) => {
       core.setFailed(`zitiHttpRequestData failed: ${err}`);
       process.exit(-1);
     });
