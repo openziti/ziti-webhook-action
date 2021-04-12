@@ -9,6 +9,7 @@ jobs:
       matrix:
         os:
           - macos-latest
+          - ubuntu-latest
 
     steps:
     - name: Checkout Project
