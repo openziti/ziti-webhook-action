@@ -36,7 +36,20 @@ jobs:
 
 The `ziti-id` input is the JSON formatted string of an identity enrolled  in a `Ziti` network.
 
-The identity can be created by enrolling via the `ziti edge enroll path/to/jwt [flags]` command.  The `ziti` executable can be obtained [here](https://github.com/openziti/ziti/releases/latest).
+The identity JSON is created by running the `ziti edge enroll ./ziti-id.jwt` command.  The one-time token file e.g. "ziti-id.jwt" is typically downloaded from the web console or output when the identity is created.
+
+```bash
+# example of saving the token file when the identity is created
+ziti edge create identity device my-ziti-identity --jwt-output-file ./ziti-id.jwt
+```
+
+The `ziti` executable can be obtained [here](https://github.com/openziti/ziti/releases/latest).
+
+Alternatively, you may run the `ziti` executable with Docker.
+
+```bash
+docker run --rm --volume ${PWD}:/mnt openziti/quickstart /openziti/ziti-bin/ziti edge enroll /mnt/ziti-id.jwt
+```
 
 ### WebHook Secret
 
