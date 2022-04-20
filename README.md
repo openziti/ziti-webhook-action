@@ -42,3 +42,50 @@ This is a random secret string that is used to provide a data integrity hash the
 ```bash
 ruby -rsecurerandom -e 'puts SecureRandom.hex(20)'
 ```
+
+### Extra Data Input
+
+There are two ways to pass arbitrary data to be included in the webhook.
+
+1. Call the Action in a separate workflow with a raw-field. This causes the GitHub context payload to have a top-level dict named `inputs` with a key for each workflow input. This is useful if this Action is always called from another workflow.
+
+```yaml
+on:
+  workflow_dispatch:  # triggered by a step in the main workflow
+    inputs:
+      my_release_version:
+        description: 'Semantic Version from Builder Bot'
+        required: true
+```
+
+This example results in a top-level dict in the webhook payload.
+
+```bash
+# One way to pass a raw field is to use the GitHub CLI which is pre-installed in all hosted runner VMs
+gh workflow --repo myorg/myrepo run --ref $(git rev-parse --abbrev-ref HEAD) --raw-field my_release_version=1.2.3 send-ziti-webhook.yml
+```
+
+```yaml
+{
+  "inputs": {"my_release_version": "1.2.3"}
+}
+```
+
+2. A multi-line string with key=value pair / line may be passed to the `data` input field of the Action. This is useful if the Action is called in-line as part of a workflow that contains other steps.
+
+```yaml
+        with:
+          ziti-id: ${{ secrets.ZITI_WEBHOOK_IDENTITY }}
+          webhook-url: ${{ secrets.ZITI_WEBHOOK_URL }}
+          webhook-secret: ${{ secrets.ZITI_WEBHOOK_SECRET }}
+          data: |
+            my_release_version=1.2.3
+```
+
+Results in:
+
+```yaml
+{
+  "data": {"my_release_version": "1.2.3"}
+}
+```
