@@ -791,7 +791,7 @@ exports.getOctokitOptions = getOctokitOptions;
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 const http = __nccwpck_require__(8605);
-const https = __nccwpck_require__(7211);
+const https = __nccwpck_require__(3034);
 const pm = __nccwpck_require__(2113);
 let tunnel;
 var HttpCodes;
@@ -1388,6 +1388,1092 @@ function checkBypass(reqUrl) {
     return false;
 }
 exports.checkBypass = checkBypass;
+
+
+/***/ }),
+
+/***/ 6016:
+/***/ ((module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+/**
+ * Module exports.
+ */
+
+module.exports = exports;
+
+/**
+ * Module dependencies.
+ */
+
+// load mocking control function for accessing s3 via https. the function is a noop always returning
+// false if not mocking.
+exports.mockS3Http = __nccwpck_require__(257).get_mockS3Http();
+exports.mockS3Http('on');
+const mocking = exports.mockS3Http('get');
+
+
+const fs = __nccwpck_require__(5747);
+const path = __nccwpck_require__(5622);
+const nopt = __nccwpck_require__(3865);
+const log = __nccwpck_require__(5385);
+log.disableProgress();
+const napi = __nccwpck_require__(9057);
+
+const EE = __nccwpck_require__(8614).EventEmitter;
+const inherits = __nccwpck_require__(1669).inherits;
+const cli_commands = [
+  'clean',
+  'install',
+  'reinstall',
+  'build',
+  'rebuild',
+  'package',
+  'testpackage',
+  'publish',
+  'unpublish',
+  'info',
+  'testbinary',
+  'reveal',
+  'configure'
+];
+const aliases = {};
+
+// differentiate node-pre-gyp's logs from npm's
+log.heading = 'node-pre-gyp';
+
+if (mocking) {
+  log.warn(`mocking s3 to ${process.env.node_pre_gyp_mock_s3}`);
+}
+
+// this is a getter to avoid circular reference warnings with node v14.
+Object.defineProperty(exports, "find", ({
+  get: function() {
+    return __nccwpck_require__(8825).find;
+  },
+  enumerable: true
+}));
+
+// in the following, "my_module" is using node-pre-gyp to
+// prebuild and install pre-built binaries. "main_module"
+// is using "my_module".
+//
+// "bin/node-pre-gyp" invokes Run() without a path. the
+// expectation is that the working directory is the package
+// root "my_module". this is true because in all cases npm is
+// executing a script in the context of "my_module".
+//
+// "pre-binding.find()" is executed by "my_module" but in the
+// context of "main_module". this is because "main_module" is
+// executing and requires "my_module" which is then executing
+// "pre-binding.find()" via "node-pre-gyp.find()", so the working
+// directory is that of "main_module".
+//
+// that's why "find()" must pass the path to package.json.
+//
+function Run({ package_json_path = './package.json', argv }) {
+  this.package_json_path = package_json_path;
+  this.commands = {};
+
+  const self = this;
+  cli_commands.forEach((command) => {
+    self.commands[command] = function(argvx, callback) {
+      log.verbose('command', command, argvx);
+      return require('./' + command)(self, argvx, callback);
+    };
+  });
+
+  this.parseArgv(argv);
+
+  // this is set to true after the binary.host property was set to
+  // either staging_host or production_host.
+  this.binaryHostSet = false;
+}
+inherits(Run, EE);
+exports.Run = Run;
+const proto = Run.prototype;
+
+/**
+ * Export the contents of the package.json.
+ */
+
+proto.package = __nccwpck_require__(6432);
+
+/**
+ * nopt configuration definitions
+ */
+
+proto.configDefs = {
+  help: Boolean,     // everywhere
+  arch: String,      // 'configure'
+  debug: Boolean,    // 'build'
+  directory: String, // bin
+  proxy: String,     // 'install'
+  loglevel: String  // everywhere
+};
+
+/**
+ * nopt shorthands
+ */
+
+proto.shorthands = {
+  release: '--no-debug',
+  C: '--directory',
+  debug: '--debug',
+  j: '--jobs',
+  silent: '--loglevel=silent',
+  silly: '--loglevel=silly',
+  verbose: '--loglevel=verbose'
+};
+
+/**
+ * expose the command aliases for the bin file to use.
+ */
+
+proto.aliases = aliases;
+
+/**
+ * Parses the given argv array and sets the 'opts', 'argv',
+ * 'command', and 'package_json' properties.
+ */
+
+proto.parseArgv = function parseOpts(argv) {
+  this.opts = nopt(this.configDefs, this.shorthands, argv);
+  this.argv = this.opts.argv.remain.slice();
+  const commands = this.todo = [];
+
+  // create a copy of the argv array with aliases mapped
+  argv = this.argv.map((arg) => {
+    // is this an alias?
+    if (arg in this.aliases) {
+      arg = this.aliases[arg];
+    }
+    return arg;
+  });
+
+  // process the mapped args into "command" objects ("name" and "args" props)
+  argv.slice().forEach((arg) => {
+    if (arg in this.commands) {
+      const args = argv.splice(0, argv.indexOf(arg));
+      argv.shift();
+      if (commands.length > 0) {
+        commands[commands.length - 1].args = args;
+      }
+      commands.push({ name: arg, args: [] });
+    }
+  });
+  if (commands.length > 0) {
+    commands[commands.length - 1].args = argv.splice(0);
+  }
+
+
+  // if a directory was specified package.json is assumed to be relative
+  // to it.
+  let package_json_path = this.package_json_path;
+  if (this.opts.directory) {
+    package_json_path = path.join(this.opts.directory, package_json_path);
+  }
+
+  this.package_json = JSON.parse(fs.readFileSync(package_json_path));
+
+  // expand commands entries for multiple napi builds
+  this.todo = napi.expand_commands(this.package_json, this.opts, commands);
+
+  // support for inheriting config env variables from npm
+  const npm_config_prefix = 'npm_config_';
+  Object.keys(process.env).forEach((name) => {
+    if (name.indexOf(npm_config_prefix) !== 0) return;
+    const val = process.env[name];
+    if (name === npm_config_prefix + 'loglevel') {
+      log.level = val;
+    } else {
+      // add the user-defined options to the config
+      name = name.substring(npm_config_prefix.length);
+      // avoid npm argv clobber already present args
+      // which avoids problem of 'npm test' calling
+      // script that runs unique npm install commands
+      if (name === 'argv') {
+        if (this.opts.argv &&
+             this.opts.argv.remain &&
+             this.opts.argv.remain.length) {
+          // do nothing
+        } else {
+          this.opts[name] = val;
+        }
+      } else {
+        this.opts[name] = val;
+      }
+    }
+  });
+
+  if (this.opts.loglevel) {
+    log.level = this.opts.loglevel;
+  }
+  log.resume();
+};
+
+/**
+ * allow the binary.host property to be set at execution time.
+ *
+ * for this to take effect requires all the following to be true.
+ * - binary is a property in package.json
+ * - binary.host is falsey
+ * - binary.staging_host is not empty
+ * - binary.production_host is not empty
+ *
+ * if any of the previous checks fail then the function returns an empty string
+ * and makes no changes to package.json's binary property.
+ *
+ *
+ * if command is "publish" then the default is set to "binary.staging_host"
+ * if command is not "publish" the the default is set to "binary.production_host"
+ *
+ * if the command-line option '--s3_host' is set to "staging" or "production" then
+ * "binary.host" is set to the specified "staging_host" or "production_host". if
+ * '--s3_host' is any other value an exception is thrown.
+ *
+ * if '--s3_host' is not present then "binary.host" is set to the default as above.
+ *
+ * this strategy was chosen so that any command other than "publish" or "unpublish" uses "production"
+ * as the default without requiring any command-line options but that "publish" and "unpublish" require
+ * '--s3_host production_host' to be specified in order to *really* publish (or unpublish). publishing
+ * to staging can be done freely without worrying about disturbing any production releases.
+ */
+proto.setBinaryHostProperty = function(command) {
+  if (this.binaryHostSet) {
+    return this.package_json.binary.host;
+  }
+  const p = this.package_json;
+  // don't set anything if host is present. it must be left blank to trigger this.
+  if (!p || !p.binary || p.binary.host) {
+    return '';
+  }
+  // and both staging and production must be present. errors will be reported later.
+  if (!p.binary.staging_host || !p.binary.production_host) {
+    return '';
+  }
+  let target = 'production_host';
+  if (command === 'publish' || command === 'unpublish') {
+    target = 'staging_host';
+  }
+  // the environment variable has priority over the default or the command line. if
+  // either the env var or the command line option are invalid throw an error.
+  const npg_s3_host = process.env.node_pre_gyp_s3_host;
+  if (npg_s3_host === 'staging' || npg_s3_host === 'production') {
+    target = `${npg_s3_host}_host`;
+  } else if (this.opts['s3_host'] === 'staging' || this.opts['s3_host'] === 'production') {
+    target = `${this.opts['s3_host']}_host`;
+  } else if (this.opts['s3_host'] || npg_s3_host) {
+    throw new Error(`invalid s3_host ${this.opts['s3_host'] || npg_s3_host}`);
+  }
+
+  p.binary.host = p.binary[target];
+  this.binaryHostSet = true;
+
+  return p.binary.host;
+};
+
+/**
+ * Returns the usage instructions for node-pre-gyp.
+ */
+
+proto.usage = function usage() {
+  const str = [
+    '',
+    '  Usage: node-pre-gyp <command> [options]',
+    '',
+    '  where <command> is one of:',
+    cli_commands.map((c) => {
+      return '    - ' + c + ' - ' + require('./' + c).usage;
+    }).join('\n'),
+    '',
+    'node-pre-gyp@' + this.version + '  ' + path.resolve(__dirname, '..'),
+    'node@' + process.versions.node
+  ].join('\n');
+  return str;
+};
+
+/**
+ * Version number getter.
+ */
+
+Object.defineProperty(proto, 'version', {
+  get: function() {
+    return this.package.version;
+  },
+  enumerable: true
+});
+
+
+/***/ }),
+
+/***/ 8825:
+/***/ ((module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+const npg = __nccwpck_require__(6016);
+const versioning = __nccwpck_require__(9394);
+const napi = __nccwpck_require__(9057);
+const existsSync = __nccwpck_require__(5747).existsSync || __nccwpck_require__(5622).existsSync;
+const path = __nccwpck_require__(5622);
+
+module.exports = exports;
+
+exports.usage = 'Finds the require path for the node-pre-gyp installed module';
+
+exports.validate = function(package_json, opts) {
+  versioning.validate_config(package_json, opts);
+};
+
+exports.find = function(package_json_path, opts) {
+  if (!existsSync(package_json_path)) {
+    throw new Error(package_json_path + 'does not exist');
+  }
+  const prog = new npg.Run({ package_json_path, argv: process.argv });
+  prog.setBinaryHostProperty();
+  const package_json = prog.package_json;
+
+  versioning.validate_config(package_json, opts);
+  let napi_build_version;
+  if (napi.get_napi_build_versions(package_json, opts)) {
+    napi_build_version = napi.get_best_napi_build_version(package_json, opts);
+  }
+  opts = opts || {};
+  if (!opts.module_root) opts.module_root = path.dirname(package_json_path);
+  const meta = versioning.evaluate(package_json, opts, napi_build_version);
+  return meta.module;
+};
+
+
+/***/ }),
+
+/***/ 9057:
+/***/ ((module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+const fs = __nccwpck_require__(5747);
+
+module.exports = exports;
+
+const versionArray = process.version
+  .substr(1)
+  .replace(/-.*$/, '')
+  .split('.')
+  .map((item) => {
+    return +item;
+  });
+
+const napi_multiple_commands = [
+  'build',
+  'clean',
+  'configure',
+  'package',
+  'publish',
+  'reveal',
+  'testbinary',
+  'testpackage',
+  'unpublish'
+];
+
+const napi_build_version_tag = 'napi_build_version=';
+
+module.exports.get_napi_version = function() {
+  // returns the non-zero numeric napi version or undefined if napi is not supported.
+  // correctly supporting target requires an updated cross-walk
+  let version = process.versions.napi; // can be undefined
+  if (!version) { // this code should never need to be updated
+    if (versionArray[0] === 9 && versionArray[1] >= 3) version = 2; // 9.3.0+
+    else if (versionArray[0] === 8) version = 1; // 8.0.0+
+  }
+  return version;
+};
+
+module.exports.get_napi_version_as_string = function(target) {
+  // returns the napi version as a string or an empty string if napi is not supported.
+  const version = module.exports.get_napi_version(target);
+  return version ? '' + version : '';
+};
+
+module.exports.validate_package_json = function(package_json, opts) { // throws Error
+
+  const binary = package_json.binary;
+  const module_path_ok = pathOK(binary.module_path);
+  const remote_path_ok = pathOK(binary.remote_path);
+  const package_name_ok = pathOK(binary.package_name);
+  const napi_build_versions = module.exports.get_napi_build_versions(package_json, opts, true);
+  const napi_build_versions_raw = module.exports.get_napi_build_versions_raw(package_json);
+
+  if (napi_build_versions) {
+    napi_build_versions.forEach((napi_build_version)=> {
+      if (!(parseInt(napi_build_version, 10) === napi_build_version && napi_build_version > 0)) {
+        throw new Error('All values specified in napi_versions must be positive integers.');
+      }
+    });
+  }
+
+  if (napi_build_versions && (!module_path_ok || (!remote_path_ok && !package_name_ok))) {
+    throw new Error('When napi_versions is specified; module_path and either remote_path or ' +
+			"package_name must contain the substitution string '{napi_build_version}`.");
+  }
+
+  if ((module_path_ok || remote_path_ok || package_name_ok) && !napi_build_versions_raw) {
+    throw new Error("When the substitution string '{napi_build_version}` is specified in " +
+			'module_path, remote_path, or package_name; napi_versions must also be specified.');
+  }
+
+  if (napi_build_versions && !module.exports.get_best_napi_build_version(package_json, opts) &&
+	module.exports.build_napi_only(package_json)) {
+    throw new Error(
+      'The Node-API version of this Node instance is ' + module.exports.get_napi_version(opts ? opts.target : undefined) + '. ' +
+			'This module supports Node-API version(s) ' + module.exports.get_napi_build_versions_raw(package_json) + '. ' +
+			'This Node instance cannot run this module.');
+  }
+
+  if (napi_build_versions_raw && !napi_build_versions && module.exports.build_napi_only(package_json)) {
+    throw new Error(
+      'The Node-API version of this Node instance is ' + module.exports.get_napi_version(opts ? opts.target : undefined) + '. ' +
+			'This module supports Node-API version(s) ' + module.exports.get_napi_build_versions_raw(package_json) + '. ' +
+			'This Node instance cannot run this module.');
+  }
+
+};
+
+function pathOK(path) {
+  return path && (path.indexOf('{napi_build_version}') !== -1 || path.indexOf('{node_napi_label}') !== -1);
+}
+
+module.exports.expand_commands = function(package_json, opts, commands) {
+  const expanded_commands = [];
+  const napi_build_versions = module.exports.get_napi_build_versions(package_json, opts);
+  commands.forEach((command)=> {
+    if (napi_build_versions && command.name === 'install') {
+      const napi_build_version = module.exports.get_best_napi_build_version(package_json, opts);
+      const args = napi_build_version ? [napi_build_version_tag + napi_build_version] : [];
+      expanded_commands.push({ name: command.name, args: args });
+    } else if (napi_build_versions && napi_multiple_commands.indexOf(command.name) !== -1) {
+      napi_build_versions.forEach((napi_build_version)=> {
+        const args = command.args.slice();
+        args.push(napi_build_version_tag + napi_build_version);
+        expanded_commands.push({ name: command.name, args: args });
+      });
+    } else {
+      expanded_commands.push(command);
+    }
+  });
+  return expanded_commands;
+};
+
+module.exports.get_napi_build_versions = function(package_json, opts, warnings) { // opts may be undefined
+  const log = __nccwpck_require__(5385);
+  let napi_build_versions = [];
+  const supported_napi_version = module.exports.get_napi_version(opts ? opts.target : undefined);
+  // remove duplicates, verify each napi version can actaully be built
+  if (package_json.binary && package_json.binary.napi_versions) {
+    package_json.binary.napi_versions.forEach((napi_version) => {
+      const duplicated = napi_build_versions.indexOf(napi_version) !== -1;
+      if (!duplicated && supported_napi_version && napi_version <= supported_napi_version) {
+        napi_build_versions.push(napi_version);
+      } else if (warnings && !duplicated && supported_napi_version) {
+        log.info('This Node instance does not support builds for Node-API version', napi_version);
+      }
+    });
+  }
+  if (opts && opts['build-latest-napi-version-only']) {
+    let latest_version = 0;
+    napi_build_versions.forEach((napi_version) => {
+      if (napi_version > latest_version) latest_version = napi_version;
+    });
+    napi_build_versions = latest_version ? [latest_version] : [];
+  }
+  return napi_build_versions.length ? napi_build_versions : undefined;
+};
+
+module.exports.get_napi_build_versions_raw = function(package_json) {
+  const napi_build_versions = [];
+  // remove duplicates
+  if (package_json.binary && package_json.binary.napi_versions) {
+    package_json.binary.napi_versions.forEach((napi_version) => {
+      if (napi_build_versions.indexOf(napi_version) === -1) {
+        napi_build_versions.push(napi_version);
+      }
+    });
+  }
+  return napi_build_versions.length ? napi_build_versions : undefined;
+};
+
+module.exports.get_command_arg = function(napi_build_version) {
+  return napi_build_version_tag + napi_build_version;
+};
+
+module.exports.get_napi_build_version_from_command_args = function(command_args) {
+  for (let i = 0; i < command_args.length; i++) {
+    const arg = command_args[i];
+    if (arg.indexOf(napi_build_version_tag) === 0) {
+      return parseInt(arg.substr(napi_build_version_tag.length), 10);
+    }
+  }
+  return undefined;
+};
+
+module.exports.swap_build_dir_out = function(napi_build_version) {
+  if (napi_build_version) {
+    const rm = __nccwpck_require__(2450);
+    rm.sync(module.exports.get_build_dir(napi_build_version));
+    fs.renameSync('build', module.exports.get_build_dir(napi_build_version));
+  }
+};
+
+module.exports.swap_build_dir_in = function(napi_build_version) {
+  if (napi_build_version) {
+    const rm = __nccwpck_require__(2450);
+    rm.sync('build');
+    fs.renameSync(module.exports.get_build_dir(napi_build_version), 'build');
+  }
+};
+
+module.exports.get_build_dir = function(napi_build_version) {
+  return 'build-tmp-napi-v' + napi_build_version;
+};
+
+module.exports.get_best_napi_build_version = function(package_json, opts) {
+  let best_napi_build_version = 0;
+  const napi_build_versions = module.exports.get_napi_build_versions(package_json, opts);
+  if (napi_build_versions) {
+    const our_napi_version = module.exports.get_napi_version(opts ? opts.target : undefined);
+    napi_build_versions.forEach((napi_build_version)=> {
+      if (napi_build_version > best_napi_build_version &&
+				napi_build_version <= our_napi_version) {
+        best_napi_build_version = napi_build_version;
+      }
+    });
+  }
+  return best_napi_build_version === 0 ? undefined : best_napi_build_version;
+};
+
+module.exports.build_napi_only = function(package_json) {
+  return package_json.binary && package_json.binary.package_name &&
+	package_json.binary.package_name.indexOf('{node_napi_label}') === -1;
+};
+
+
+/***/ }),
+
+/***/ 257:
+/***/ ((module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+module.exports = exports;
+
+const url = __nccwpck_require__(8835);
+const fs = __nccwpck_require__(5747);
+const path = __nccwpck_require__(5622);
+
+module.exports.detect = function(opts, config) {
+  const to = opts.hosted_path;
+  const uri = url.parse(to);
+  config.prefix = (!uri.pathname || uri.pathname === '/') ? '' : uri.pathname.replace('/', '');
+  if (opts.bucket && opts.region) {
+    config.bucket = opts.bucket;
+    config.region = opts.region;
+    config.endpoint = opts.host;
+    config.s3ForcePathStyle = opts.s3ForcePathStyle;
+  } else {
+    const parts = uri.hostname.split('.s3');
+    const bucket = parts[0];
+    if (!bucket) {
+      return;
+    }
+    if (!config.bucket) {
+      config.bucket = bucket;
+    }
+    if (!config.region) {
+      const region = parts[1].slice(1).split('.')[0];
+      if (region === 'amazonaws') {
+        config.region = 'us-east-1';
+      } else {
+        config.region = region;
+      }
+    }
+  }
+};
+
+module.exports.get_s3 = function(config) {
+
+  if (process.env.node_pre_gyp_mock_s3) {
+    // here we're mocking. node_pre_gyp_mock_s3 is the scratch directory
+    // for the mock code.
+    const AWSMock = __nccwpck_require__(3241);
+    const os = __nccwpck_require__(2087);
+
+    AWSMock.config.basePath = `${os.tmpdir()}/mock`;
+
+    const s3 = AWSMock.S3();
+
+    // wrapped callback maker. fs calls return code of ENOENT but AWS.S3 returns
+    // NotFound.
+    const wcb = (fn) => (err, ...args) => {
+      if (err && err.code === 'ENOENT') {
+        err.code = 'NotFound';
+      }
+      return fn(err, ...args);
+    };
+
+    return {
+      listObjects(params, callback) {
+        return s3.listObjects(params, wcb(callback));
+      },
+      headObject(params, callback) {
+        return s3.headObject(params, wcb(callback));
+      },
+      deleteObject(params, callback) {
+        return s3.deleteObject(params, wcb(callback));
+      },
+      putObject(params, callback) {
+        return s3.putObject(params, wcb(callback));
+      }
+    };
+  }
+
+  // if not mocking then setup real s3.
+  const AWS = __nccwpck_require__(1989);
+
+  AWS.config.update(config);
+  const s3 = new AWS.S3();
+
+  // need to change if additional options need to be specified.
+  return {
+    listObjects(params, callback) {
+      return s3.listObjects(params, callback);
+    },
+    headObject(params, callback) {
+      return s3.headObject(params, callback);
+    },
+    deleteObject(params, callback) {
+      return s3.deleteObject(params, callback);
+    },
+    putObject(params, callback) {
+      return s3.putObject(params, callback);
+    }
+  };
+
+
+
+};
+
+//
+// function to get the mocking control function. if not mocking it returns a no-op.
+//
+// if mocking it sets up the mock http interceptors that use the mocked s3 file system
+// to fulfill reponses.
+module.exports.get_mockS3Http = function() {
+  let mock_s3 = false;
+  if (!process.env.node_pre_gyp_mock_s3) {
+    return () => mock_s3;
+  }
+
+  const nock = __nccwpck_require__(9316);
+  // the bucket used for testing, as addressed by https.
+  const host = 'https://mapbox-node-pre-gyp-public-testing-bucket.s3.us-east-1.amazonaws.com';
+  const mockDir = process.env.node_pre_gyp_mock_s3 + '/mapbox-node-pre-gyp-public-testing-bucket';
+
+  // function to setup interceptors. they are "turned off" by setting mock_s3 to false.
+  const mock_http = () => {
+    // eslint-disable-next-line no-unused-vars
+    function get(uri, requestBody) {
+      const filepath = path.join(mockDir, uri.replace('%2B', '+'));
+
+      try {
+        fs.accessSync(filepath, fs.constants.R_OK);
+      } catch (e) {
+        return [404, 'not found\n'];
+      }
+
+      // the mock s3 functions just write to disk, so just read from it.
+      return [200, fs.createReadStream(filepath)];
+    }
+
+    // eslint-disable-next-line no-unused-vars
+    return nock(host)
+      .persist()
+      .get(() => mock_s3) // mock any uri for s3 when true
+      .reply(get);
+  };
+
+  // setup interceptors. they check the mock_s3 flag to determine whether to intercept.
+  mock_http(nock, host, mockDir);
+  // function to turn matching all requests to s3 on/off.
+  const mockS3Http = (action) => {
+    const previous = mock_s3;
+    if (action === 'off') {
+      mock_s3 = false;
+    } else if (action === 'on') {
+      mock_s3 = true;
+    } else if (action !== 'get') {
+      throw new Error(`illegal action for setMockHttp ${action}`);
+    }
+    return previous;
+  };
+
+  // call mockS3Http with the argument
+  // - 'on' - turn it on
+  // - 'off' - turn it off (used by fetch.test.js so it doesn't interfere with redirects)
+  // - 'get' - return true or false for 'on' or 'off'
+  return mockS3Http;
+};
+
+
+
+
+
+/***/ }),
+
+/***/ 9394:
+/***/ ((module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+module.exports = exports;
+
+const path = __nccwpck_require__(5622);
+const semver = __nccwpck_require__(4595);
+const url = __nccwpck_require__(8835);
+const detect_libc = __nccwpck_require__(4549);
+const napi = __nccwpck_require__(9057);
+
+let abi_crosswalk;
+
+// This is used for unit testing to provide a fake
+// ABI crosswalk that emulates one that is not updated
+// for the current version
+if (process.env.NODE_PRE_GYP_ABI_CROSSWALK) {
+  abi_crosswalk = require(process.env.NODE_PRE_GYP_ABI_CROSSWALK);
+} else {
+  abi_crosswalk = __nccwpck_require__(1427);
+}
+
+const major_versions = {};
+Object.keys(abi_crosswalk).forEach((v) => {
+  const major = v.split('.')[0];
+  if (!major_versions[major]) {
+    major_versions[major] = v;
+  }
+});
+
+function get_electron_abi(runtime, target_version) {
+  if (!runtime) {
+    throw new Error('get_electron_abi requires valid runtime arg');
+  }
+  if (typeof target_version === 'undefined') {
+    // erroneous CLI call
+    throw new Error('Empty target version is not supported if electron is the target.');
+  }
+  // Electron guarantees that patch version update won't break native modules.
+  const sem_ver = semver.parse(target_version);
+  return runtime + '-v' + sem_ver.major + '.' + sem_ver.minor;
+}
+module.exports.get_electron_abi = get_electron_abi;
+
+function get_node_webkit_abi(runtime, target_version) {
+  if (!runtime) {
+    throw new Error('get_node_webkit_abi requires valid runtime arg');
+  }
+  if (typeof target_version === 'undefined') {
+    // erroneous CLI call
+    throw new Error('Empty target version is not supported if node-webkit is the target.');
+  }
+  return runtime + '-v' + target_version;
+}
+module.exports.get_node_webkit_abi = get_node_webkit_abi;
+
+function get_node_abi(runtime, versions) {
+  if (!runtime) {
+    throw new Error('get_node_abi requires valid runtime arg');
+  }
+  if (!versions) {
+    throw new Error('get_node_abi requires valid process.versions object');
+  }
+  const sem_ver = semver.parse(versions.node);
+  if (sem_ver.major === 0 && sem_ver.minor % 2) { // odd series
+    // https://github.com/mapbox/node-pre-gyp/issues/124
+    return runtime + '-v' + versions.node;
+  } else {
+    // process.versions.modules added in >= v0.10.4 and v0.11.7
+    // https://github.com/joyent/node/commit/ccabd4a6fa8a6eb79d29bc3bbe9fe2b6531c2d8e
+    return versions.modules ? runtime + '-v' + (+versions.modules) :
+      'v8-' + versions.v8.split('.').slice(0, 2).join('.');
+  }
+}
+module.exports.get_node_abi = get_node_abi;
+
+function get_runtime_abi(runtime, target_version) {
+  if (!runtime) {
+    throw new Error('get_runtime_abi requires valid runtime arg');
+  }
+  if (runtime === 'node-webkit') {
+    return get_node_webkit_abi(runtime, target_version || process.versions['node-webkit']);
+  } else if (runtime === 'electron') {
+    return get_electron_abi(runtime, target_version || process.versions.electron);
+  } else {
+    if (runtime !== 'node') {
+      throw new Error("Unknown Runtime: '" + runtime + "'");
+    }
+    if (!target_version) {
+      return get_node_abi(runtime, process.versions);
+    } else {
+      let cross_obj;
+      // abi_crosswalk generated with ./scripts/abi_crosswalk.js
+      if (abi_crosswalk[target_version]) {
+        cross_obj = abi_crosswalk[target_version];
+      } else {
+        const target_parts = target_version.split('.').map((i) => { return +i; });
+        if (target_parts.length !== 3) { // parse failed
+          throw new Error('Unknown target version: ' + target_version);
+        }
+        /*
+                    The below code tries to infer the last known ABI compatible version
+                    that we have recorded in the abi_crosswalk.json when an exact match
+                    is not possible. The reasons for this to exist are complicated:
+
+                       - We support passing --target to be able to allow developers to package binaries for versions of node
+                         that are not the same one as they are running. This might also be used in combination with the
+                         --target_arch or --target_platform flags to also package binaries for alternative platforms
+                       - When --target is passed we can't therefore determine the ABI (process.versions.modules) from the node
+                         version that is running in memory
+                       - So, therefore node-pre-gyp keeps an "ABI crosswalk" (lib/util/abi_crosswalk.json) to be able to look
+                         this info up for all versions
+                       - But we cannot easily predict what the future ABI will be for released versions
+                       - And node-pre-gyp needs to be a `bundledDependency` in apps that depend on it in order to work correctly
+                         by being fully available at install time.
+                       - So, the speed of node releases and the bundled nature of node-pre-gyp mean that a new node-pre-gyp release
+                         need to happen for every node.js/io.js/node-webkit/nw.js/atom-shell/etc release that might come online if
+                         you want the `--target` flag to keep working for the latest version
+                       - Which is impractical ^^
+                       - Hence the below code guesses about future ABI to make the need to update node-pre-gyp less demanding.
+
+                    In practice then you can have a dependency of your app like `node-sqlite3` that bundles a `node-pre-gyp` that
+                    only knows about node v0.10.33 in the `abi_crosswalk.json` but target node v0.10.34 (which is assumed to be
+                    ABI compatible with v0.10.33).
+
+                    TODO: use semver module instead of custom version parsing
+                */
+        const major = target_parts[0];
+        let minor = target_parts[1];
+        let patch = target_parts[2];
+        // io.js: yeah if node.js ever releases 1.x this will break
+        // but that is unlikely to happen: https://github.com/iojs/io.js/pull/253#issuecomment-69432616
+        if (major === 1) {
+          // look for last release that is the same major version
+          // e.g. we assume io.js 1.x is ABI compatible with >= 1.0.0
+          while (true) {
+            if (minor > 0) --minor;
+            if (patch > 0) --patch;
+            const new_iojs_target = '' + major + '.' + minor + '.' + patch;
+            if (abi_crosswalk[new_iojs_target]) {
+              cross_obj = abi_crosswalk[new_iojs_target];
+              console.log('Warning: node-pre-gyp could not find exact match for ' + target_version);
+              console.log('Warning: but node-pre-gyp successfully choose ' + new_iojs_target + ' as ABI compatible target');
+              break;
+            }
+            if (minor === 0 && patch === 0) {
+              break;
+            }
+          }
+        } else if (major >= 2) {
+          // look for last release that is the same major version
+          if (major_versions[major]) {
+            cross_obj = abi_crosswalk[major_versions[major]];
+            console.log('Warning: node-pre-gyp could not find exact match for ' + target_version);
+            console.log('Warning: but node-pre-gyp successfully choose ' + major_versions[major] + ' as ABI compatible target');
+          }
+        } else if (major === 0) { // node.js
+          if (target_parts[1] % 2 === 0) { // for stable/even node.js series
+            // look for the last release that is the same minor release
+            // e.g. we assume node 0.10.x is ABI compatible with >= 0.10.0
+            while (--patch > 0) {
+              const new_node_target = '' + major + '.' + minor + '.' + patch;
+              if (abi_crosswalk[new_node_target]) {
+                cross_obj = abi_crosswalk[new_node_target];
+                console.log('Warning: node-pre-gyp could not find exact match for ' + target_version);
+                console.log('Warning: but node-pre-gyp successfully choose ' + new_node_target + ' as ABI compatible target');
+                break;
+              }
+            }
+          }
+        }
+      }
+      if (!cross_obj) {
+        throw new Error('Unsupported target version: ' + target_version);
+      }
+      // emulate process.versions
+      const versions_obj = {
+        node: target_version,
+        v8: cross_obj.v8 + '.0',
+        // abi_crosswalk uses 1 for node versions lacking process.versions.modules
+        // process.versions.modules added in >= v0.10.4 and v0.11.7
+        modules: cross_obj.node_abi > 1 ? cross_obj.node_abi : undefined
+      };
+      return get_node_abi(runtime, versions_obj);
+    }
+  }
+}
+module.exports.get_runtime_abi = get_runtime_abi;
+
+const required_parameters = [
+  'module_name',
+  'module_path',
+  'host'
+];
+
+function validate_config(package_json, opts) {
+  const msg = package_json.name + ' package.json is not node-pre-gyp ready:\n';
+  const missing = [];
+  if (!package_json.main) {
+    missing.push('main');
+  }
+  if (!package_json.version) {
+    missing.push('version');
+  }
+  if (!package_json.name) {
+    missing.push('name');
+  }
+  if (!package_json.binary) {
+    missing.push('binary');
+  }
+  const o = package_json.binary;
+  if (o) {
+    required_parameters.forEach((p) => {
+      if (!o[p] || typeof o[p] !== 'string') {
+        missing.push('binary.' + p);
+      }
+    });
+  }
+
+  if (missing.length >= 1) {
+    throw new Error(msg + 'package.json must declare these properties: \n' + missing.join('\n'));
+  }
+  if (o) {
+    // enforce https over http
+    const protocol = url.parse(o.host).protocol;
+    if (protocol === 'http:') {
+      throw new Error("'host' protocol (" + protocol + ") is invalid - only 'https:' is accepted");
+    }
+  }
+  napi.validate_package_json(package_json, opts);
+}
+
+module.exports.validate_config = validate_config;
+
+function eval_template(template, opts) {
+  Object.keys(opts).forEach((key) => {
+    const pattern = '{' + key + '}';
+    while (template.indexOf(pattern) > -1) {
+      template = template.replace(pattern, opts[key]);
+    }
+  });
+  return template;
+}
+
+// url.resolve needs single trailing slash
+// to behave correctly, otherwise a double slash
+// may end up in the url which breaks requests
+// and a lacking slash may not lead to proper joining
+function fix_slashes(pathname) {
+  if (pathname.slice(-1) !== '/') {
+    return pathname + '/';
+  }
+  return pathname;
+}
+
+// remove double slashes
+// note: path.normalize will not work because
+// it will convert forward to back slashes
+function drop_double_slashes(pathname) {
+  return pathname.replace(/\/\//g, '/');
+}
+
+function get_process_runtime(versions) {
+  let runtime = 'node';
+  if (versions['node-webkit']) {
+    runtime = 'node-webkit';
+  } else if (versions.electron) {
+    runtime = 'electron';
+  }
+  return runtime;
+}
+
+module.exports.get_process_runtime = get_process_runtime;
+
+const default_package_name = '{module_name}-v{version}-{node_abi}-{platform}-{arch}.tar.gz';
+const default_remote_path = '';
+
+module.exports.evaluate = function(package_json, options, napi_build_version) {
+  options = options || {};
+  validate_config(package_json, options); // options is a suitable substitute for opts in this case
+  const v = package_json.version;
+  const module_version = semver.parse(v);
+  const runtime = options.runtime || get_process_runtime(process.versions);
+  const opts = {
+    name: package_json.name,
+    configuration: options.debug ? 'Debug' : 'Release',
+    debug: options.debug,
+    module_name: package_json.binary.module_name,
+    version: module_version.version,
+    prerelease: module_version.prerelease.length ? module_version.prerelease.join('.') : '',
+    build: module_version.build.length ? module_version.build.join('.') : '',
+    major: module_version.major,
+    minor: module_version.minor,
+    patch: module_version.patch,
+    runtime: runtime,
+    node_abi: get_runtime_abi(runtime, options.target),
+    node_abi_napi: napi.get_napi_version(options.target) ? 'napi' : get_runtime_abi(runtime, options.target),
+    napi_version: napi.get_napi_version(options.target), // non-zero numeric, undefined if unsupported
+    napi_build_version: napi_build_version || '',
+    node_napi_label: napi_build_version ? 'napi-v' + napi_build_version : get_runtime_abi(runtime, options.target),
+    target: options.target || '',
+    platform: options.target_platform || process.platform,
+    target_platform: options.target_platform || process.platform,
+    arch: options.target_arch || process.arch,
+    target_arch: options.target_arch || process.arch,
+    libc: options.target_libc || detect_libc.familySync() || 'unknown',
+    module_main: package_json.main,
+    toolset: options.toolset || '', // address https://github.com/mapbox/node-pre-gyp/issues/119
+    bucket: package_json.binary.bucket,
+    region: package_json.binary.region,
+    s3ForcePathStyle: package_json.binary.s3ForcePathStyle || false
+  };
+    // support host mirror with npm config `--{module_name}_binary_host_mirror`
+    // e.g.: https://github.com/node-inspector/v8-profiler/blob/master/package.json#L25
+    // > npm install v8-profiler --profiler_binary_host_mirror=https://npm.taobao.org/mirrors/node-inspector/
+  const validModuleName = opts.module_name.replace('-', '_');
+  const host = process.env['npm_config_' + validModuleName + '_binary_host_mirror'] || package_json.binary.host;
+  opts.host = fix_slashes(eval_template(host, opts));
+  opts.module_path = eval_template(package_json.binary.module_path, opts);
+  // now we resolve the module_path to ensure it is absolute so that binding.gyp variables work predictably
+  if (options.module_root) {
+    // resolve relative to known module root: works for pre-binding require
+    opts.module_path = path.join(options.module_root, opts.module_path);
+  } else {
+    // resolve relative to current working directory: works for node-pre-gyp commands
+    opts.module_path = path.resolve(opts.module_path);
+  }
+  opts.module = path.join(opts.module_path, opts.module_name + '.node');
+  opts.remote_path = package_json.binary.remote_path ? drop_double_slashes(fix_slashes(eval_template(package_json.binary.remote_path, opts))) : default_remote_path;
+  const package_name = package_json.binary.package_name ? package_json.binary.package_name : default_package_name;
+  opts.package_name = eval_template(package_name, opts);
+  opts.staged_tarball = path.join('build/stage', opts.remote_path, opts.package_name);
+  opts.hosted_path = url.resolve(opts.host, opts.remote_path);
+  opts.hosted_tarball = url.resolve(opts.hosted_path, opts.package_name);
+  return opts;
+};
 
 
 /***/ }),
@@ -3755,8 +4841,14 @@ function lexSort (a, b) {
 
 "use strict";
 
-module.exports = function () {
-	return /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-PRZcf-nqry=><]/g;
+
+module.exports = ({onlyFirst = false} = {}) => {
+	const pattern = [
+		'[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]+)*|[a-zA-Z\\d]+(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]*)*)?\\u0007)',
+		'(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-ntqry=><~]))'
+	].join('|');
+
+	return new RegExp(pattern, onlyFirst ? undefined : 'g');
 };
 
 
@@ -3767,40 +4859,41 @@ module.exports = function () {
 
 "use strict";
 
+module.exports = validate
 
 function isArguments (thingy) {
   return thingy != null && typeof thingy === 'object' && thingy.hasOwnProperty('callee')
 }
 
-var types = {
-  '*': {label: 'any', check: function () { return true }},
-  A: {label: 'array', check: function (thingy) { return Array.isArray(thingy) || isArguments(thingy) }},
-  S: {label: 'string', check: function (thingy) { return typeof thingy === 'string' }},
-  N: {label: 'number', check: function (thingy) { return typeof thingy === 'number' }},
-  F: {label: 'function', check: function (thingy) { return typeof thingy === 'function' }},
-  O: {label: 'object', check: function (thingy) { return typeof thingy === 'object' && thingy != null && !types.A.check(thingy) && !types.E.check(thingy) }},
-  B: {label: 'boolean', check: function (thingy) { return typeof thingy === 'boolean' }},
-  E: {label: 'error', check: function (thingy) { return thingy instanceof Error }},
-  Z: {label: 'null', check: function (thingy) { return thingy == null }}
+const types = {
+  '*': {label: 'any', check: () => true},
+  A: {label: 'array', check: _ => Array.isArray(_) || isArguments(_)},
+  S: {label: 'string', check: _ => typeof _ === 'string'},
+  N: {label: 'number', check: _ => typeof _ === 'number'},
+  F: {label: 'function', check: _ => typeof _ === 'function'},
+  O: {label: 'object', check: _ => typeof _ === 'object' && _ != null && !types.A.check(_) && !types.E.check(_)},
+  B: {label: 'boolean', check: _ => typeof _ === 'boolean'},
+  E: {label: 'error', check: _ => _ instanceof Error},
+  Z: {label: 'null', check: _ => _ == null}
 }
 
 function addSchema (schema, arity) {
-  var group = arity[schema.length] = arity[schema.length] || []
+  const group = arity[schema.length] = arity[schema.length] || []
   if (group.indexOf(schema) === -1) group.push(schema)
 }
 
-var validate = module.exports = function (rawSchemas, args) {
+function validate (rawSchemas, args) {
   if (arguments.length !== 2) throw wrongNumberOfArgs(['SA'], arguments.length)
   if (!rawSchemas) throw missingRequiredArg(0, 'rawSchemas')
   if (!args) throw missingRequiredArg(1, 'args')
   if (!types.S.check(rawSchemas)) throw invalidType(0, ['string'], rawSchemas)
   if (!types.A.check(args)) throw invalidType(1, ['array'], args)
-  var schemas = rawSchemas.split('|')
-  var arity = {}
+  const schemas = rawSchemas.split('|')
+  const arity = {}
 
-  schemas.forEach(function (schema) {
-    for (var ii = 0; ii < schema.length; ++ii) {
-      var type = schema[ii]
+  schemas.forEach(schema => {
+    for (let ii = 0; ii < schema.length; ++ii) {
+      const type = schema[ii]
       if (!types[type]) throw unknownType(ii, type)
     }
     if (/E.*E/.test(schema)) throw moreThanOneError(schema)
@@ -3811,20 +4904,18 @@ var validate = module.exports = function (rawSchemas, args) {
       if (schema.length === 1) addSchema('', arity)
     }
   })
-  var matching = arity[args.length]
+  let matching = arity[args.length]
   if (!matching) {
     throw wrongNumberOfArgs(Object.keys(arity), args.length)
   }
-  for (var ii = 0; ii < args.length; ++ii) {
-    var newMatching = matching.filter(function (schema) {
-      var type = schema[ii]
-      var typeCheck = types[type].check
+  for (let ii = 0; ii < args.length; ++ii) {
+    let newMatching = matching.filter(schema => {
+      const type = schema[ii]
+      const typeCheck = types[type].check
       return typeCheck(args[ii])
     })
     if (!newMatching.length) {
-      var labels = matching.map(function (schema) {
-        return types[schema[ii]].label
-      }).filter(function (schema) { return schema != null })
+      const labels = matching.map(_ => types[_[ii]].label).filter(_ => _ != null)
       throw invalidType(ii, labels, args[ii])
     }
     matching = newMatching
@@ -3840,8 +4931,8 @@ function unknownType (num, type) {
 }
 
 function invalidType (num, expectedTypes, value) {
-  var valueType
-  Object.keys(types).forEach(function (typeCode) {
+  let valueType
+  Object.keys(types).forEach(typeCode => {
     if (types[typeCode].check(value)) valueType = types[typeCode].label
   })
   return newException('EINVALIDTYPE', 'Argument #' + (num + 1) + ': Expected ' +
@@ -3853,8 +4944,8 @@ function englishList (list) {
 }
 
 function wrongNumberOfArgs (expected, got) {
-  var english = englishList(expected)
-  var args = expected.every(function (ex) { return ex.length === 1 })
+  const english = englishList(expected)
+  const args = expected.every(ex => ex.length === 1)
     ? 'argument'
     : 'arguments'
   return newException('EWRONGARGCOUNT', 'Expected ' + english + ' ' + args + ' but got ' + got)
@@ -3866,28 +4957,29 @@ function moreThanOneError (schema) {
 }
 
 function newException (code, msg) {
-  var e = new Error(msg)
-  e.code = code
-  if (Error.captureStackTrace) Error.captureStackTrace(e, validate)
-  return e
+  const err = new Error(msg)
+  err.code = code
+  /* istanbul ignore else */
+  if (Error.captureStackTrace) Error.captureStackTrace(err, validate)
+  return err
 }
 
 
 /***/ }),
 
-/***/ 2579:
+/***/ 8570:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
 "use strict";
 
-exports.TrackerGroup = __nccwpck_require__(4975)
-exports.Tracker = __nccwpck_require__(8174)
-exports.TrackerStream = __nccwpck_require__(7488)
+exports.TrackerGroup = __nccwpck_require__(6522)
+exports.Tracker = __nccwpck_require__(4635)
+exports.TrackerStream = __nccwpck_require__(7313)
 
 
 /***/ }),
 
-/***/ 3361:
+/***/ 6397:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
@@ -3906,15 +4998,15 @@ util.inherits(TrackerBase, EventEmitter)
 
 /***/ }),
 
-/***/ 4975:
+/***/ 6522:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 var util = __nccwpck_require__(1669)
-var TrackerBase = __nccwpck_require__(3361)
-var Tracker = __nccwpck_require__(8174)
-var TrackerStream = __nccwpck_require__(7488)
+var TrackerBase = __nccwpck_require__(6397)
+var Tracker = __nccwpck_require__(4635)
+var TrackerStream = __nccwpck_require__(7313)
 
 var TrackerGroup = module.exports = function (name) {
   TrackerBase.call(this, name)
@@ -3931,7 +5023,9 @@ util.inherits(TrackerGroup, TrackerBase)
 function bubbleChange (trackerGroup) {
   return function (name, completed, tracker) {
     trackerGroup.completion[tracker.id] = completed
-    if (trackerGroup.finished) return
+    if (trackerGroup.finished) {
+      return
+    }
     trackerGroup.emit('change', name || trackerGroup.name, trackerGroup.completed(), trackerGroup)
   }
 }
@@ -3965,17 +5059,22 @@ TrackerGroup.prototype.addUnit = function (unit, weight) {
   this.trackers.push(unit)
   this.completion[unit.id] = unit.completed()
   unit.on('change', this.bubbleChange)
-  if (!this.finished) this.emit('change', unit.name, this.completion[unit.id], unit)
+  if (!this.finished) {
+    this.emit('change', unit.name, this.completion[unit.id], unit)
+  }
   return unit
 }
 
 TrackerGroup.prototype.completed = function () {
-  if (this.trackers.length === 0) return 0
+  if (this.trackers.length === 0) {
+    return 0
+  }
   var valPerWeight = 1 / this.totalWeight
   var completed = 0
   for (var ii = 0; ii < this.trackers.length; ii++) {
     var trackerId = this.trackers[ii].id
-    completed += valPerWeight * this.weight[trackerId] * this.completion[trackerId]
+    completed +=
+      valPerWeight * this.weight[trackerId] * this.completion[trackerId]
   }
   return completed
 }
@@ -3994,7 +5093,9 @@ TrackerGroup.prototype.newStream = function (name, todo, weight) {
 
 TrackerGroup.prototype.finish = function () {
   this.finished = true
-  if (!this.trackers.length) this.addUnit(new Tracker(), 1, true)
+  if (!this.trackers.length) {
+    this.addUnit(new Tracker(), 1, true)
+  }
   for (var ii = 0; ii < this.trackers.length; ii++) {
     var tracker = this.trackers[ii]
     tracker.finish()
@@ -4021,7 +5122,7 @@ TrackerGroup.prototype.debug = function (depth) {
 
 /***/ }),
 
-/***/ 7488:
+/***/ 7313:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
@@ -4029,7 +5130,7 @@ TrackerGroup.prototype.debug = function (depth) {
 var util = __nccwpck_require__(1669)
 var stream = __nccwpck_require__(1682)
 var delegate = __nccwpck_require__(8241)
-var Tracker = __nccwpck_require__(8174)
+var Tracker = __nccwpck_require__(4635)
 
 var TrackerStream = module.exports = function (name, size, options) {
   stream.Transform.call(this, options)
@@ -4065,13 +5166,13 @@ delegate(TrackerStream.prototype, 'tracker')
 
 /***/ }),
 
-/***/ 8174:
+/***/ 4635:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 var util = __nccwpck_require__(1669)
-var TrackerBase = __nccwpck_require__(3361)
+var TrackerBase = __nccwpck_require__(6397)
 
 var Tracker = module.exports = function (name, todo) {
   TrackerBase.call(this, name)
@@ -4091,7 +5192,9 @@ Tracker.prototype.addWork = function (work) {
 
 Tracker.prototype.completeWork = function (work) {
   this.workDone += work
-  if (this.workDone > this.workTodo) this.workDone = this.workTodo
+  if (this.workDone > this.workTodo) {
+    this.workDone = this.workTodo
+  }
   this.emit('change', this.name, this.completed(), this)
 }
 
@@ -4558,42 +5661,143 @@ function expand(str, isTop) {
 
 /***/ }),
 
-/***/ 717:
+/***/ 7742:
 /***/ ((module) => {
 
-"use strict";
-/* eslint-disable babel/new-cap, xo/throw-new-error */
+// call it on itself so we can test the export val for basic stuff
+module.exports = colorSupport({ alwaysReturn: true }, colorSupport)
 
-module.exports = function (str, pos) {
-	if (str === null || str === undefined) {
-		throw TypeError();
-	}
+function hasNone (obj, options) {
+  obj.level = 0
+  obj.hasBasic = false
+  obj.has256 = false
+  obj.has16m = false
+  if (!options.alwaysReturn) {
+    return false
+  }
+  return obj
+}
 
-	str = String(str);
+function hasBasic (obj) {
+  obj.hasBasic = true
+  obj.has256 = false
+  obj.has16m = false
+  obj.level = 1
+  return obj
+}
 
-	var size = str.length;
-	var i = pos ? Number(pos) : 0;
+function has256 (obj) {
+  obj.hasBasic = true
+  obj.has256 = true
+  obj.has16m = false
+  obj.level = 2
+  return obj
+}
 
-	if (Number.isNaN(i)) {
-		i = 0;
-	}
+function has16m (obj) {
+  obj.hasBasic = true
+  obj.has256 = true
+  obj.has16m = true
+  obj.level = 3
+  return obj
+}
 
-	if (i < 0 || i >= size) {
-		return undefined;
-	}
+function colorSupport (options, obj) {
+  options = options || {}
 
-	var first = str.charCodeAt(i);
+  obj = obj || {}
 
-	if (first >= 0xD800 && first <= 0xDBFF && size > i + 1) {
-		var second = str.charCodeAt(i + 1);
+  // if just requesting a specific level, then return that.
+  if (typeof options.level === 'number') {
+    switch (options.level) {
+      case 0:
+        return hasNone(obj, options)
+      case 1:
+        return hasBasic(obj)
+      case 2:
+        return has256(obj)
+      case 3:
+        return has16m(obj)
+    }
+  }
 
-		if (second >= 0xDC00 && second <= 0xDFFF) {
-			return ((first - 0xD800) * 0x400) + second - 0xDC00 + 0x10000;
-		}
-	}
+  obj.level = 0
+  obj.hasBasic = false
+  obj.has256 = false
+  obj.has16m = false
 
-	return first;
-};
+  if (typeof process === 'undefined' ||
+      !process ||
+      !process.stdout ||
+      !process.env ||
+      !process.platform) {
+    return hasNone(obj, options)
+  }
+
+  var env = options.env || process.env
+  var stream = options.stream || process.stdout
+  var term = options.term || env.TERM || ''
+  var platform = options.platform || process.platform
+
+  if (!options.ignoreTTY && !stream.isTTY) {
+    return hasNone(obj, options)
+  }
+
+  if (!options.ignoreDumb && term === 'dumb' && !env.COLORTERM) {
+    return hasNone(obj, options)
+  }
+
+  if (platform === 'win32') {
+    return hasBasic(obj)
+  }
+
+  if (env.TMUX) {
+    return has256(obj)
+  }
+
+  if (!options.ignoreCI && (env.CI || env.TEAMCITY_VERSION)) {
+    if (env.TRAVIS) {
+      return has256(obj)
+    } else {
+      return hasNone(obj, options)
+    }
+  }
+
+  // TODO: add more term programs
+  switch (env.TERM_PROGRAM) {
+    case 'iTerm.app':
+      var ver = env.TERM_PROGRAM_VERSION || '0.'
+      if (/^[0-2]\./.test(ver)) {
+        return has256(obj)
+      } else {
+        return has16m(obj)
+      }
+
+    case 'HyperTerm':
+    case 'Hyper':
+      return has16m(obj)
+
+    case 'MacTerm':
+      return has16m(obj)
+
+    case 'Apple_Terminal':
+      return has256(obj)
+  }
+
+  if (/^xterm-256/.test(term)) {
+    return has256(obj)
+  }
+
+  if (/^screen|^xterm|^vt100|color|ansi|cygwin|linux/i.test(term)) {
+    return hasBasic(obj)
+  }
+
+  if (env.COLORTERM) {
+    return hasBasic(obj)
+  }
+
+  return hasNone(obj, options)
+}
 
 
 /***/ }),
@@ -4746,120 +5950,6 @@ exports.color = function color (colorWith) {
 function colorNameToCode (color) {
   if (colors[color] != null) return colors[color]
   throw new Error('Unknown color or style name: ' + color)
-}
-
-
-/***/ }),
-
-/***/ 9892:
-/***/ ((__unused_webpack_module, exports) => {
-
-// Copyright Joyent, Inc. and other Node contributors.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a
-// copy of this software and associated documentation files (the
-// "Software"), to deal in the Software without restriction, including
-// without limitation the rights to use, copy, modify, merge, publish,
-// distribute, sublicense, and/or sell copies of the Software, and to permit
-// persons to whom the Software is furnished to do so, subject to the
-// following conditions:
-//
-// The above copyright notice and this permission notice shall be included
-// in all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
-// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
-// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
-// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
-// USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-// NOTE: These type checking functions intentionally don't use `instanceof`
-// because it is fragile and can be easily faked with `Object.create()`.
-
-function isArray(arg) {
-  if (Array.isArray) {
-    return Array.isArray(arg);
-  }
-  return objectToString(arg) === '[object Array]';
-}
-exports.isArray = isArray;
-
-function isBoolean(arg) {
-  return typeof arg === 'boolean';
-}
-exports.isBoolean = isBoolean;
-
-function isNull(arg) {
-  return arg === null;
-}
-exports.isNull = isNull;
-
-function isNullOrUndefined(arg) {
-  return arg == null;
-}
-exports.isNullOrUndefined = isNullOrUndefined;
-
-function isNumber(arg) {
-  return typeof arg === 'number';
-}
-exports.isNumber = isNumber;
-
-function isString(arg) {
-  return typeof arg === 'string';
-}
-exports.isString = isString;
-
-function isSymbol(arg) {
-  return typeof arg === 'symbol';
-}
-exports.isSymbol = isSymbol;
-
-function isUndefined(arg) {
-  return arg === void 0;
-}
-exports.isUndefined = isUndefined;
-
-function isRegExp(re) {
-  return objectToString(re) === '[object RegExp]';
-}
-exports.isRegExp = isRegExp;
-
-function isObject(arg) {
-  return typeof arg === 'object' && arg !== null;
-}
-exports.isObject = isObject;
-
-function isDate(d) {
-  return objectToString(d) === '[object Date]';
-}
-exports.isDate = isDate;
-
-function isError(e) {
-  return (objectToString(e) === '[object Error]' || e instanceof Error);
-}
-exports.isError = isError;
-
-function isFunction(arg) {
-  return typeof arg === 'function';
-}
-exports.isFunction = isFunction;
-
-function isPrimitive(arg) {
-  return arg === null ||
-         typeof arg === 'boolean' ||
-         typeof arg === 'number' ||
-         typeof arg === 'string' ||
-         typeof arg === 'symbol' ||  // ES6 symbol
-         typeof arg === 'undefined';
-}
-exports.isPrimitive = isPrimitive;
-
-exports.isBuffer = Buffer.isBuffer;
-
-function objectToString(o) {
-  return Object.prototype.toString.call(o);
 }
 
 
@@ -5027,95 +6117,219 @@ exports.Deprecation = Deprecation;
 "use strict";
 
 
-var platform = __nccwpck_require__(2087).platform();
-var spawnSync = __nccwpck_require__(3129).spawnSync;
-var readdirSync = __nccwpck_require__(5747).readdirSync;
+const childProcess = __nccwpck_require__(3129);
+const { isLinux, getReport } = __nccwpck_require__(70);
 
-var GLIBC = 'glibc';
-var MUSL = 'musl';
+const command = 'getconf GNU_LIBC_VERSION 2>&1 || true; ldd --version 2>&1 || true';
+let commandOut = '';
 
-var spawnOptions = {
-  encoding: 'utf8',
-  env: process.env
+const safeCommand = () => {
+  if (!commandOut) {
+    return new Promise((resolve) => {
+      childProcess.exec(command, (err, out) => {
+        commandOut = err ? ' ' : out;
+        resolve(commandOut);
+      });
+    });
+  }
+  return commandOut;
 };
 
-if (!spawnSync) {
-  spawnSync = function () {
-    return { status: 126, stdout: '', stderr: '' };
-  };
-}
-
-function contains (needle) {
-  return function (haystack) {
-    return haystack.indexOf(needle) !== -1;
-  };
-}
-
-function versionFromMuslLdd (out) {
-  return out.split(/[\r\n]+/)[1].trim().split(/\s/)[1];
-}
-
-function safeReaddirSync (path) {
-  try {
-    return readdirSync(path);
-  } catch (e) {}
-  return [];
-}
-
-var family = '';
-var version = '';
-var method = '';
-
-if (platform === 'linux') {
-  // Try getconf
-  var glibc = spawnSync('getconf', ['GNU_LIBC_VERSION'], spawnOptions);
-  if (glibc.status === 0) {
-    family = GLIBC;
-    version = glibc.stdout.trim().split(' ')[1];
-    method = 'getconf';
-  } else {
-    // Try ldd
-    var ldd = spawnSync('ldd', ['--version'], spawnOptions);
-    if (ldd.status === 0 && ldd.stdout.indexOf(MUSL) !== -1) {
-      family = MUSL;
-      version = versionFromMuslLdd(ldd.stdout);
-      method = 'ldd';
-    } else if (ldd.status === 1 && ldd.stderr.indexOf(MUSL) !== -1) {
-      family = MUSL;
-      version = versionFromMuslLdd(ldd.stderr);
-      method = 'ldd';
-    } else {
-      // Try filesystem (family only)
-      var lib = safeReaddirSync('/lib');
-      if (lib.some(contains('-linux-gnu'))) {
-        family = GLIBC;
-        method = 'filesystem';
-      } else if (lib.some(contains('libc.musl-'))) {
-        family = MUSL;
-        method = 'filesystem';
-      } else if (lib.some(contains('ld-musl-'))) {
-        family = MUSL;
-        method = 'filesystem';
-      } else {
-        var usrSbin = safeReaddirSync('/usr/sbin');
-        if (usrSbin.some(contains('glibc'))) {
-          family = GLIBC;
-          method = 'filesystem';
-        }
-      }
+const safeCommandSync = () => {
+  if (!commandOut) {
+    try {
+      commandOut = childProcess.execSync(command, { encoding: 'utf8' });
+    } catch (_err) {
+      commandOut = ' ';
     }
   }
-}
+  return commandOut;
+};
 
-var isNonGlibcLinux = (family !== '' && family !== GLIBC);
+/**
+ * A String constant containing the value `glibc`.
+ * @type {string}
+ * @public
+ */
+const GLIBC = 'glibc';
+
+/**
+ * A String constant containing the value `musl`.
+ * @type {string}
+ * @public
+ */
+const MUSL = 'musl';
+
+const isFileMusl = (f) => f.includes('libc.musl-') || f.includes('ld-musl-');
+
+const familyFromReport = () => {
+  const report = getReport();
+  if (report.header && report.header.glibcVersionRuntime) {
+    return GLIBC;
+  }
+  if (Array.isArray(report.sharedObjects)) {
+    if (report.sharedObjects.some(isFileMusl)) {
+      return MUSL;
+    }
+  }
+  return null;
+};
+
+const familyFromCommand = (out) => {
+  const [getconf, ldd1] = out.split(/[\r\n]+/);
+  if (getconf && getconf.includes(GLIBC)) {
+    return GLIBC;
+  }
+  if (ldd1 && ldd1.includes(MUSL)) {
+    return MUSL;
+  }
+  return null;
+};
+
+/**
+ * Resolves with the libc family when it can be determined, `null` otherwise.
+ * @returns {Promise<?string>}
+ */
+const family = async () => {
+  let family = null;
+  if (isLinux()) {
+    family = familyFromReport();
+    if (!family) {
+      const out = await safeCommand();
+      family = familyFromCommand(out);
+    }
+  }
+  return family;
+};
+
+/**
+ * Returns the libc family when it can be determined, `null` otherwise.
+ * @returns {?string}
+ */
+const familySync = () => {
+  let family = null;
+  if (isLinux()) {
+    family = familyFromReport();
+    if (!family) {
+      const out = safeCommandSync();
+      family = familyFromCommand(out);
+    }
+  }
+  return family;
+};
+
+/**
+ * Resolves `true` only when the platform is Linux and the libc family is not `glibc`.
+ * @returns {Promise<boolean>}
+ */
+const isNonGlibcLinux = async () => isLinux() && await family() !== GLIBC;
+
+/**
+ * Returns `true` only when the platform is Linux and the libc family is not `glibc`.
+ * @returns {boolean}
+ */
+const isNonGlibcLinuxSync = () => isLinux() && familySync() !== GLIBC;
+
+const versionFromReport = () => {
+  const report = getReport();
+  if (report.header && report.header.glibcVersionRuntime) {
+    return report.header.glibcVersionRuntime;
+  }
+  return null;
+};
+
+const versionSuffix = (s) => s.trim().split(/\s+/)[1];
+
+const versionFromCommand = (out) => {
+  const [getconf, ldd1, ldd2] = out.split(/[\r\n]+/);
+  if (getconf && getconf.includes(GLIBC)) {
+    return versionSuffix(getconf);
+  }
+  if (ldd1 && ldd2 && ldd1.includes(MUSL)) {
+    return versionSuffix(ldd2);
+  }
+  return null;
+};
+
+/**
+ * Resolves with the libc version when it can be determined, `null` otherwise.
+ * @returns {Promise<?string>}
+ */
+const version = async () => {
+  let version = null;
+  if (isLinux()) {
+    version = versionFromReport();
+    if (!version) {
+      const out = await safeCommand();
+      version = versionFromCommand(out);
+    }
+  }
+  return version;
+};
+
+/**
+ * Returns the libc version when it can be determined, `null` otherwise.
+ * @returns {?string}
+ */
+const versionSync = () => {
+  let version = null;
+  if (isLinux()) {
+    version = versionFromReport();
+    if (!version) {
+      const out = safeCommandSync();
+      version = versionFromCommand(out);
+    }
+  }
+  return version;
+};
 
 module.exports = {
-  GLIBC: GLIBC,
-  MUSL: MUSL,
-  family: family,
-  version: version,
-  method: method,
-  isNonGlibcLinux: isNonGlibcLinux
+  GLIBC,
+  MUSL,
+  family,
+  familySync,
+  isNonGlibcLinux,
+  isNonGlibcLinuxSync,
+  version,
+  versionSync
+};
+
+
+/***/ }),
+
+/***/ 70:
+/***/ ((module) => {
+
+"use strict";
+
+
+const isLinux = () => process.platform === 'linux';
+
+let report = null;
+const getReport = () => {
+  if (!report) {
+    /* istanbul ignore next */
+    report = isLinux() && process.report
+      ? process.report.getReport()
+      : {};
+  }
+  return report;
+};
+
+module.exports = { isLinux, getReport };
+
+
+/***/ }),
+
+/***/ 4166:
+/***/ ((module) => {
+
+"use strict";
+
+
+module.exports = function () {
+  // https://mths.be/emoji
+  return /\uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62(?:\uDB40\uDC65\uDB40\uDC6E\uDB40\uDC67|\uDB40\uDC73\uDB40\uDC63\uDB40\uDC74|\uDB40\uDC77\uDB40\uDC6C\uDB40\uDC73)\uDB40\uDC7F|\uD83D\uDC68(?:\uD83C\uDFFC\u200D(?:\uD83E\uDD1D\u200D\uD83D\uDC68\uD83C\uDFFB|\uD83C[\uDF3E\uDF73\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFF\u200D(?:\uD83E\uDD1D\u200D\uD83D\uDC68(?:\uD83C[\uDFFB-\uDFFE])|\uD83C[\uDF3E\uDF73\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFE\u200D(?:\uD83E\uDD1D\u200D\uD83D\uDC68(?:\uD83C[\uDFFB-\uDFFD])|\uD83C[\uDF3E\uDF73\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFD\u200D(?:\uD83E\uDD1D\u200D\uD83D\uDC68(?:\uD83C[\uDFFB\uDFFC])|\uD83C[\uDF3E\uDF73\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\u200D(?:\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D)?\uD83D\uDC68|(?:\uD83D[\uDC68\uDC69])\u200D(?:\uD83D\uDC66\u200D\uD83D\uDC66|\uD83D\uDC67\u200D(?:\uD83D[\uDC66\uDC67]))|\uD83D\uDC66\u200D\uD83D\uDC66|\uD83D\uDC67\u200D(?:\uD83D[\uDC66\uDC67])|(?:\uD83D[\uDC68\uDC69])\u200D(?:\uD83D[\uDC66\uDC67])|[\u2695\u2696\u2708]\uFE0F|\uD83D[\uDC66\uDC67]|\uD83C[\uDF3E\uDF73\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|(?:\uD83C\uDFFB\u200D[\u2695\u2696\u2708]|\uD83C\uDFFF\u200D[\u2695\u2696\u2708]|\uD83C\uDFFE\u200D[\u2695\u2696\u2708]|\uD83C\uDFFD\u200D[\u2695\u2696\u2708]|\uD83C\uDFFC\u200D[\u2695\u2696\u2708])\uFE0F|\uD83C\uDFFB\u200D(?:\uD83C[\uDF3E\uDF73\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C[\uDFFB-\uDFFF])|(?:\uD83E\uDDD1\uD83C\uDFFB\u200D\uD83E\uDD1D\u200D\uD83E\uDDD1|\uD83D\uDC69\uD83C\uDFFC\u200D\uD83E\uDD1D\u200D\uD83D\uDC69)\uD83C\uDFFB|\uD83E\uDDD1(?:\uD83C\uDFFF\u200D\uD83E\uDD1D\u200D\uD83E\uDDD1(?:\uD83C[\uDFFB-\uDFFF])|\u200D\uD83E\uDD1D\u200D\uD83E\uDDD1)|(?:\uD83E\uDDD1\uD83C\uDFFE\u200D\uD83E\uDD1D\u200D\uD83E\uDDD1|\uD83D\uDC69\uD83C\uDFFF\u200D\uD83E\uDD1D\u200D(?:\uD83D[\uDC68\uDC69]))(?:\uD83C[\uDFFB-\uDFFE])|(?:\uD83E\uDDD1\uD83C\uDFFC\u200D\uD83E\uDD1D\u200D\uD83E\uDDD1|\uD83D\uDC69\uD83C\uDFFD\u200D\uD83E\uDD1D\u200D\uD83D\uDC69)(?:\uD83C[\uDFFB\uDFFC])|\uD83D\uDC69(?:\uD83C\uDFFE\u200D(?:\uD83E\uDD1D\u200D\uD83D\uDC68(?:\uD83C[\uDFFB-\uDFFD\uDFFF])|\uD83C[\uDF3E\uDF73\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFC\u200D(?:\uD83E\uDD1D\u200D\uD83D\uDC68(?:\uD83C[\uDFFB\uDFFD-\uDFFF])|\uD83C[\uDF3E\uDF73\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFB\u200D(?:\uD83E\uDD1D\u200D\uD83D\uDC68(?:\uD83C[\uDFFC-\uDFFF])|\uD83C[\uDF3E\uDF73\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFD\u200D(?:\uD83E\uDD1D\u200D\uD83D\uDC68(?:\uD83C[\uDFFB\uDFFC\uDFFE\uDFFF])|\uD83C[\uDF3E\uDF73\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\u200D(?:\u2764\uFE0F\u200D(?:\uD83D\uDC8B\u200D(?:\uD83D[\uDC68\uDC69])|\uD83D[\uDC68\uDC69])|\uD83C[\uDF3E\uDF73\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD])|\uD83C\uDFFF\u200D(?:\uD83C[\uDF3E\uDF73\uDF93\uDFA4\uDFA8\uDFEB\uDFED]|\uD83D[\uDCBB\uDCBC\uDD27\uDD2C\uDE80\uDE92]|\uD83E[\uDDAF-\uDDB3\uDDBC\uDDBD]))|\uD83D\uDC69\u200D\uD83D\uDC69\u200D(?:\uD83D\uDC66\u200D\uD83D\uDC66|\uD83D\uDC67\u200D(?:\uD83D[\uDC66\uDC67]))|(?:\uD83E\uDDD1\uD83C\uDFFD\u200D\uD83E\uDD1D\u200D\uD83E\uDDD1|\uD83D\uDC69\uD83C\uDFFE\u200D\uD83E\uDD1D\u200D\uD83D\uDC69)(?:\uD83C[\uDFFB-\uDFFD])|\uD83D\uDC69\u200D\uD83D\uDC66\u200D\uD83D\uDC66|\uD83D\uDC69\u200D\uD83D\uDC69\u200D(?:\uD83D[\uDC66\uDC67])|(?:\uD83D\uDC41\uFE0F\u200D\uD83D\uDDE8|\uD83D\uDC69(?:\uD83C\uDFFF\u200D[\u2695\u2696\u2708]|\uD83C\uDFFE\u200D[\u2695\u2696\u2708]|\uD83C\uDFFC\u200D[\u2695\u2696\u2708]|\uD83C\uDFFB\u200D[\u2695\u2696\u2708]|\uD83C\uDFFD\u200D[\u2695\u2696\u2708]|\u200D[\u2695\u2696\u2708])|(?:(?:\u26F9|\uD83C[\uDFCB\uDFCC]|\uD83D\uDD75)\uFE0F|\uD83D\uDC6F|\uD83E[\uDD3C\uDDDE\uDDDF])\u200D[\u2640\u2642]|(?:\u26F9|\uD83C[\uDFCB\uDFCC]|\uD83D\uDD75)(?:\uD83C[\uDFFB-\uDFFF])\u200D[\u2640\u2642]|(?:\uD83C[\uDFC3\uDFC4\uDFCA]|\uD83D[\uDC6E\uDC71\uDC73\uDC77\uDC81\uDC82\uDC86\uDC87\uDE45-\uDE47\uDE4B\uDE4D\uDE4E\uDEA3\uDEB4-\uDEB6]|\uD83E[\uDD26\uDD37-\uDD39\uDD3D\uDD3E\uDDB8\uDDB9\uDDCD-\uDDCF\uDDD6-\uDDDD])(?:(?:\uD83C[\uDFFB-\uDFFF])\u200D[\u2640\u2642]|\u200D[\u2640\u2642])|\uD83C\uDFF4\u200D\u2620)\uFE0F|\uD83D\uDC69\u200D\uD83D\uDC67\u200D(?:\uD83D[\uDC66\uDC67])|\uD83C\uDFF3\uFE0F\u200D\uD83C\uDF08|\uD83D\uDC15\u200D\uD83E\uDDBA|\uD83D\uDC69\u200D\uD83D\uDC66|\uD83D\uDC69\u200D\uD83D\uDC67|\uD83C\uDDFD\uD83C\uDDF0|\uD83C\uDDF4\uD83C\uDDF2|\uD83C\uDDF6\uD83C\uDDE6|[#\*0-9]\uFE0F\u20E3|\uD83C\uDDE7(?:\uD83C[\uDDE6\uDDE7\uDDE9-\uDDEF\uDDF1-\uDDF4\uDDF6-\uDDF9\uDDFB\uDDFC\uDDFE\uDDFF])|\uD83C\uDDF9(?:\uD83C[\uDDE6\uDDE8\uDDE9\uDDEB-\uDDED\uDDEF-\uDDF4\uDDF7\uDDF9\uDDFB\uDDFC\uDDFF])|\uD83C\uDDEA(?:\uD83C[\uDDE6\uDDE8\uDDEA\uDDEC\uDDED\uDDF7-\uDDFA])|\uD83E\uDDD1(?:\uD83C[\uDFFB-\uDFFF])|\uD83C\uDDF7(?:\uD83C[\uDDEA\uDDF4\uDDF8\uDDFA\uDDFC])|\uD83D\uDC69(?:\uD83C[\uDFFB-\uDFFF])|\uD83C\uDDF2(?:\uD83C[\uDDE6\uDDE8-\uDDED\uDDF0-\uDDFF])|\uD83C\uDDE6(?:\uD83C[\uDDE8-\uDDEC\uDDEE\uDDF1\uDDF2\uDDF4\uDDF6-\uDDFA\uDDFC\uDDFD\uDDFF])|\uD83C\uDDF0(?:\uD83C[\uDDEA\uDDEC-\uDDEE\uDDF2\uDDF3\uDDF5\uDDF7\uDDFC\uDDFE\uDDFF])|\uD83C\uDDED(?:\uD83C[\uDDF0\uDDF2\uDDF3\uDDF7\uDDF9\uDDFA])|\uD83C\uDDE9(?:\uD83C[\uDDEA\uDDEC\uDDEF\uDDF0\uDDF2\uDDF4\uDDFF])|\uD83C\uDDFE(?:\uD83C[\uDDEA\uDDF9])|\uD83C\uDDEC(?:\uD83C[\uDDE6\uDDE7\uDDE9-\uDDEE\uDDF1-\uDDF3\uDDF5-\uDDFA\uDDFC\uDDFE])|\uD83C\uDDF8(?:\uD83C[\uDDE6-\uDDEA\uDDEC-\uDDF4\uDDF7-\uDDF9\uDDFB\uDDFD-\uDDFF])|\uD83C\uDDEB(?:\uD83C[\uDDEE-\uDDF0\uDDF2\uDDF4\uDDF7])|\uD83C\uDDF5(?:\uD83C[\uDDE6\uDDEA-\uDDED\uDDF0-\uDDF3\uDDF7-\uDDF9\uDDFC\uDDFE])|\uD83C\uDDFB(?:\uD83C[\uDDE6\uDDE8\uDDEA\uDDEC\uDDEE\uDDF3\uDDFA])|\uD83C\uDDF3(?:\uD83C[\uDDE6\uDDE8\uDDEA-\uDDEC\uDDEE\uDDF1\uDDF4\uDDF5\uDDF7\uDDFA\uDDFF])|\uD83C\uDDE8(?:\uD83C[\uDDE6\uDDE8\uDDE9\uDDEB-\uDDEE\uDDF0-\uDDF5\uDDF7\uDDFA-\uDDFF])|\uD83C\uDDF1(?:\uD83C[\uDDE6-\uDDE8\uDDEE\uDDF0\uDDF7-\uDDFB\uDDFE])|\uD83C\uDDFF(?:\uD83C[\uDDE6\uDDF2\uDDFC])|\uD83C\uDDFC(?:\uD83C[\uDDEB\uDDF8])|\uD83C\uDDFA(?:\uD83C[\uDDE6\uDDEC\uDDF2\uDDF3\uDDF8\uDDFE\uDDFF])|\uD83C\uDDEE(?:\uD83C[\uDDE8-\uDDEA\uDDF1-\uDDF4\uDDF6-\uDDF9])|\uD83C\uDDEF(?:\uD83C[\uDDEA\uDDF2\uDDF4\uDDF5])|(?:\uD83C[\uDFC3\uDFC4\uDFCA]|\uD83D[\uDC6E\uDC71\uDC73\uDC77\uDC81\uDC82\uDC86\uDC87\uDE45-\uDE47\uDE4B\uDE4D\uDE4E\uDEA3\uDEB4-\uDEB6]|\uD83E[\uDD26\uDD37-\uDD39\uDD3D\uDD3E\uDDB8\uDDB9\uDDCD-\uDDCF\uDDD6-\uDDDD])(?:\uD83C[\uDFFB-\uDFFF])|(?:\u26F9|\uD83C[\uDFCB\uDFCC]|\uD83D\uDD75)(?:\uD83C[\uDFFB-\uDFFF])|(?:[\u261D\u270A-\u270D]|\uD83C[\uDF85\uDFC2\uDFC7]|\uD83D[\uDC42\uDC43\uDC46-\uDC50\uDC66\uDC67\uDC6B-\uDC6D\uDC70\uDC72\uDC74-\uDC76\uDC78\uDC7C\uDC83\uDC85\uDCAA\uDD74\uDD7A\uDD90\uDD95\uDD96\uDE4C\uDE4F\uDEC0\uDECC]|\uD83E[\uDD0F\uDD18-\uDD1C\uDD1E\uDD1F\uDD30-\uDD36\uDDB5\uDDB6\uDDBB\uDDD2-\uDDD5])(?:\uD83C[\uDFFB-\uDFFF])|(?:[\u231A\u231B\u23E9-\u23EC\u23F0\u23F3\u25FD\u25FE\u2614\u2615\u2648-\u2653\u267F\u2693\u26A1\u26AA\u26AB\u26BD\u26BE\u26C4\u26C5\u26CE\u26D4\u26EA\u26F2\u26F3\u26F5\u26FA\u26FD\u2705\u270A\u270B\u2728\u274C\u274E\u2753-\u2755\u2757\u2795-\u2797\u27B0\u27BF\u2B1B\u2B1C\u2B50\u2B55]|\uD83C[\uDC04\uDCCF\uDD8E\uDD91-\uDD9A\uDDE6-\uDDFF\uDE01\uDE1A\uDE2F\uDE32-\uDE36\uDE38-\uDE3A\uDE50\uDE51\uDF00-\uDF20\uDF2D-\uDF35\uDF37-\uDF7C\uDF7E-\uDF93\uDFA0-\uDFCA\uDFCF-\uDFD3\uDFE0-\uDFF0\uDFF4\uDFF8-\uDFFF]|\uD83D[\uDC00-\uDC3E\uDC40\uDC42-\uDCFC\uDCFF-\uDD3D\uDD4B-\uDD4E\uDD50-\uDD67\uDD7A\uDD95\uDD96\uDDA4\uDDFB-\uDE4F\uDE80-\uDEC5\uDECC\uDED0-\uDED2\uDED5\uDEEB\uDEEC\uDEF4-\uDEFA\uDFE0-\uDFEB]|\uD83E[\uDD0D-\uDD3A\uDD3C-\uDD45\uDD47-\uDD71\uDD73-\uDD76\uDD7A-\uDDA2\uDDA5-\uDDAA\uDDAE-\uDDCA\uDDCD-\uDDFF\uDE70-\uDE73\uDE78-\uDE7A\uDE80-\uDE82\uDE90-\uDE95])|(?:[#\*0-9\xA9\xAE\u203C\u2049\u2122\u2139\u2194-\u2199\u21A9\u21AA\u231A\u231B\u2328\u23CF\u23E9-\u23F3\u23F8-\u23FA\u24C2\u25AA\u25AB\u25B6\u25C0\u25FB-\u25FE\u2600-\u2604\u260E\u2611\u2614\u2615\u2618\u261D\u2620\u2622\u2623\u2626\u262A\u262E\u262F\u2638-\u263A\u2640\u2642\u2648-\u2653\u265F\u2660\u2663\u2665\u2666\u2668\u267B\u267E\u267F\u2692-\u2697\u2699\u269B\u269C\u26A0\u26A1\u26AA\u26AB\u26B0\u26B1\u26BD\u26BE\u26C4\u26C5\u26C8\u26CE\u26CF\u26D1\u26D3\u26D4\u26E9\u26EA\u26F0-\u26F5\u26F7-\u26FA\u26FD\u2702\u2705\u2708-\u270D\u270F\u2712\u2714\u2716\u271D\u2721\u2728\u2733\u2734\u2744\u2747\u274C\u274E\u2753-\u2755\u2757\u2763\u2764\u2795-\u2797\u27A1\u27B0\u27BF\u2934\u2935\u2B05-\u2B07\u2B1B\u2B1C\u2B50\u2B55\u3030\u303D\u3297\u3299]|\uD83C[\uDC04\uDCCF\uDD70\uDD71\uDD7E\uDD7F\uDD8E\uDD91-\uDD9A\uDDE6-\uDDFF\uDE01\uDE02\uDE1A\uDE2F\uDE32-\uDE3A\uDE50\uDE51\uDF00-\uDF21\uDF24-\uDF93\uDF96\uDF97\uDF99-\uDF9B\uDF9E-\uDFF0\uDFF3-\uDFF5\uDFF7-\uDFFF]|\uD83D[\uDC00-\uDCFD\uDCFF-\uDD3D\uDD49-\uDD4E\uDD50-\uDD67\uDD6F\uDD70\uDD73-\uDD7A\uDD87\uDD8A-\uDD8D\uDD90\uDD95\uDD96\uDDA4\uDDA5\uDDA8\uDDB1\uDDB2\uDDBC\uDDC2-\uDDC4\uDDD1-\uDDD3\uDDDC-\uDDDE\uDDE1\uDDE3\uDDE8\uDDEF\uDDF3\uDDFA-\uDE4F\uDE80-\uDEC5\uDECB-\uDED2\uDED5\uDEE0-\uDEE5\uDEE9\uDEEB\uDEEC\uDEF0\uDEF3-\uDEFA\uDFE0-\uDFEB]|\uD83E[\uDD0D-\uDD3A\uDD3C-\uDD45\uDD47-\uDD71\uDD73-\uDD76\uDD7A-\uDDA2\uDDA5-\uDDAA\uDDAE-\uDDCA\uDDCD-\uDDFF\uDE70-\uDE73\uDE78-\uDE7A\uDE80-\uDE82\uDE90-\uDE95])\uFE0F|(?:[\u261D\u26F9\u270A-\u270D]|\uD83C[\uDF85\uDFC2-\uDFC4\uDFC7\uDFCA-\uDFCC]|\uD83D[\uDC42\uDC43\uDC46-\uDC50\uDC66-\uDC78\uDC7C\uDC81-\uDC83\uDC85-\uDC87\uDC8F\uDC91\uDCAA\uDD74\uDD75\uDD7A\uDD90\uDD95\uDD96\uDE45-\uDE47\uDE4B-\uDE4F\uDEA3\uDEB4-\uDEB6\uDEC0\uDECC]|\uD83E[\uDD0F\uDD18-\uDD1F\uDD26\uDD30-\uDD39\uDD3C-\uDD3E\uDDB5\uDDB6\uDDB8\uDDB9\uDDBB\uDDCD-\uDDCF\uDDD1-\uDDDD])/g;
 };
 
 
@@ -5559,21 +6773,13 @@ exports.Internal = function Internal (msg) {
 /***/ }),
 
 /***/ 5752:
-/***/ ((module) => {
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
+var colorSupport = __nccwpck_require__(7742)
 
-module.exports = isWin32() || isColorTerm()
-
-function isWin32 () {
-  return process.platform === 'win32'
-}
-
-function isColorTerm () {
-  var termHasColor = /^screen|^xterm|^vt100|color|ansi|cygwin|linux/i
-  return !!process.env.COLORTERM || termHasColor.test(process.env.TERM)
-}
+module.exports = colorSupport().hasBasic
 
 
 /***/ }),
@@ -5772,7 +6978,7 @@ Gauge.prototype.show = function (section, completed) {
 
 Gauge.prototype.pulse = function (subsection) {
   this._status.subsection = subsection || ''
-  this._status.spun ++
+  this._status.spun++
   if (this._disabled) return
   if (!this._showing) return
   this._requestRedraw()
@@ -5919,7 +7125,7 @@ function repeat (string, width) {
       result += string
     }
     n = Math.floor(n / 2)
-    /*eslint no-self-assign: 0*/
+    /* eslint no-self-assign: 0 */
     string += string
   } while (n && stringWidth(result) < width)
 
@@ -5936,7 +7142,6 @@ function repeat (string, width) {
 
 var align = __nccwpck_require__(4556)
 var validate = __nccwpck_require__(415)
-var objectAssign = __nccwpck_require__(9200)
 var wideTruncate = __nccwpck_require__(5913)
 var error = __nccwpck_require__(5231)
 var TemplateItem = __nccwpck_require__(4072)
@@ -5969,7 +7174,7 @@ function hasPreOrPost (item, values) {
 }
 
 function generatePreAndPost (baseItem, parentValues) {
-  var item = objectAssign({}, baseItem)
+  var item = Object.assign({}, baseItem)
   var values = Object.create(parentValues)
   var template = []
   var pre = preType(item)
@@ -6017,13 +7222,11 @@ function prepareItems (width, template, values) {
 
   var output = template.map(cloneAndObjectify).filter(function (item) { return item != null })
 
-  var outputLength = 0
   var remainingSpace = width
   var variableCount = output.length
 
   function consumeSpace (length) {
     if (length > remainingSpace) length = remainingSpace
-    outputLength += length
     remainingSpace -= length
   }
 
@@ -6235,7 +7438,6 @@ TemplateItem.prototype.getMinLength = function () {
 }
 
 
-
 /***/ }),
 
 /***/ 631:
@@ -6358,7 +7560,6 @@ ThemeSetProto.newThemeSet = function () {
 }
 
 
-
 /***/ }),
 
 /***/ 6841:
@@ -6366,7 +7567,7 @@ ThemeSetProto.newThemeSet = function () {
 
 "use strict";
 
-var consoleControl = __nccwpck_require__(9852)
+var color = __nccwpck_require__(9852).color
 var ThemeSet = __nccwpck_require__(631)
 
 var themes = module.exports = new ThemeSet()
@@ -6384,12 +7585,12 @@ themes.addTheme('ASCII', {
 
 themes.addTheme('colorASCII', themes.getTheme('ASCII'), {
   progressbarTheme: {
-    preComplete: consoleControl.color('inverse'),
-    complete: ' ',
-    postComplete: consoleControl.color('stopInverse'),
-    preRemaining: consoleControl.color('brightBlack'),
+    preComplete: color('bgBrightWhite', 'brightWhite'),
+    complete: '#',
+    postComplete: color('reset'),
+    preRemaining: color('bgBrightBlack', 'brightBlack'),
     remaining: '.',
-    postRemaining: consoleControl.color('reset')
+    postRemaining: color('reset')
   }
 })
 
@@ -6397,7 +7598,7 @@ themes.addTheme('brailleSpinner', {
   preProgressbar: '⸨',
   postProgressbar: '⸩',
   progressbarTheme: {
-    complete: '░',
+    complete: '#',
     remaining: '⠂'
   },
   activityIndicatorTheme: '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏',
@@ -6406,12 +7607,12 @@ themes.addTheme('brailleSpinner', {
 
 themes.addTheme('colorBrailleSpinner', themes.getTheme('brailleSpinner'), {
   progressbarTheme: {
-    preComplete: consoleControl.color('inverse'),
-    complete: ' ',
-    postComplete: consoleControl.color('stopInverse'),
-    preRemaining: consoleControl.color('brightBlack'),
-    remaining: '░',
-    postRemaining: consoleControl.color('reset')
+    preComplete: color('bgBrightWhite', 'brightWhite'),
+    complete: '#',
+    postComplete: color('reset'),
+    preRemaining: color('bgBrightBlack', 'brightBlack'),
+    remaining: '⠂',
+    postRemaining: color('reset')
   }
 })
 
@@ -6419,6 +7620,8 @@ themes.setDefault({}, 'ASCII')
 themes.setDefault({hasColor: true}, 'colorASCII')
 themes.setDefault({platform: 'darwin', hasUnicode: true}, 'brailleSpinner')
 themes.setDefault({platform: 'darwin', hasUnicode: true, hasColor: true}, 'colorBrailleSpinner')
+themes.setDefault({platform: 'linux', hasUnicode: true}, 'brailleSpinner')
+themes.setDefault({platform: 'linux', hasUnicode: true, hasColor: true}, 'colorBrailleSpinner')
 
 
 /***/ }),
@@ -8129,55 +9332,59 @@ if (typeof Object.create === 'function') {
 /***/ }),
 
 /***/ 4600:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+/***/ ((module) => {
 
 "use strict";
+/* eslint-disable yoda */
 
-var numberIsNan = __nccwpck_require__(6954);
 
-module.exports = function (x) {
-	if (numberIsNan(x)) {
+const isFullwidthCodePoint = codePoint => {
+	if (Number.isNaN(codePoint)) {
 		return false;
 	}
 
-	// https://github.com/nodejs/io.js/blob/cff7300a578be1b10001f2d967aaedc88aee6402/lib/readline.js#L1369
-
-	// code points are derived from:
+	// Code points are derived from:
 	// http://www.unix.org/Public/UNIDATA/EastAsianWidth.txt
-	if (x >= 0x1100 && (
-		x <= 0x115f ||  // Hangul Jamo
-		0x2329 === x || // LEFT-POINTING ANGLE BRACKET
-		0x232a === x || // RIGHT-POINTING ANGLE BRACKET
-		// CJK Radicals Supplement .. Enclosed CJK Letters and Months
-		(0x2e80 <= x && x <= 0x3247 && x !== 0x303f) ||
-		// Enclosed CJK Letters and Months .. CJK Unified Ideographs Extension A
-		0x3250 <= x && x <= 0x4dbf ||
-		// CJK Unified Ideographs .. Yi Radicals
-		0x4e00 <= x && x <= 0xa4c6 ||
-		// Hangul Jamo Extended-A
-		0xa960 <= x && x <= 0xa97c ||
-		// Hangul Syllables
-		0xac00 <= x && x <= 0xd7a3 ||
-		// CJK Compatibility Ideographs
-		0xf900 <= x && x <= 0xfaff ||
-		// Vertical Forms
-		0xfe10 <= x && x <= 0xfe19 ||
-		// CJK Compatibility Forms .. Small Form Variants
-		0xfe30 <= x && x <= 0xfe6b ||
-		// Halfwidth and Fullwidth Forms
-		0xff01 <= x && x <= 0xff60 ||
-		0xffe0 <= x && x <= 0xffe6 ||
-		// Kana Supplement
-		0x1b000 <= x && x <= 0x1b001 ||
-		// Enclosed Ideographic Supplement
-		0x1f200 <= x && x <= 0x1f251 ||
-		// CJK Unified Ideographs Extension B .. Tertiary Ideographic Plane
-		0x20000 <= x && x <= 0x3fffd)) {
+	if (
+		codePoint >= 0x1100 && (
+			codePoint <= 0x115F || // Hangul Jamo
+			codePoint === 0x2329 || // LEFT-POINTING ANGLE BRACKET
+			codePoint === 0x232A || // RIGHT-POINTING ANGLE BRACKET
+			// CJK Radicals Supplement .. Enclosed CJK Letters and Months
+			(0x2E80 <= codePoint && codePoint <= 0x3247 && codePoint !== 0x303F) ||
+			// Enclosed CJK Letters and Months .. CJK Unified Ideographs Extension A
+			(0x3250 <= codePoint && codePoint <= 0x4DBF) ||
+			// CJK Unified Ideographs .. Yi Radicals
+			(0x4E00 <= codePoint && codePoint <= 0xA4C6) ||
+			// Hangul Jamo Extended-A
+			(0xA960 <= codePoint && codePoint <= 0xA97C) ||
+			// Hangul Syllables
+			(0xAC00 <= codePoint && codePoint <= 0xD7A3) ||
+			// CJK Compatibility Ideographs
+			(0xF900 <= codePoint && codePoint <= 0xFAFF) ||
+			// Vertical Forms
+			(0xFE10 <= codePoint && codePoint <= 0xFE19) ||
+			// CJK Compatibility Forms .. Small Form Variants
+			(0xFE30 <= codePoint && codePoint <= 0xFE6B) ||
+			// Halfwidth and Fullwidth Forms
+			(0xFF01 <= codePoint && codePoint <= 0xFF60) ||
+			(0xFFE0 <= codePoint && codePoint <= 0xFFE6) ||
+			// Kana Supplement
+			(0x1B000 <= codePoint && codePoint <= 0x1B001) ||
+			// Enclosed Ideographic Supplement
+			(0x1F200 <= codePoint && codePoint <= 0x1F251) ||
+			// CJK Unified Ideographs Extension B .. Tertiary Ideographic Plane
+			(0x20000 <= codePoint && codePoint <= 0x3FFFD)
+		)
+	) {
 		return true;
 	}
 
 	return false;
-}
+};
+
+module.exports = isFullwidthCodePoint;
+module.exports.default = isFullwidthCodePoint;
 
 
 /***/ }),
@@ -8228,14 +9435,344 @@ exports.isPlainObject = isPlainObject;
 
 /***/ }),
 
-/***/ 2563:
-/***/ ((module) => {
+/***/ 637:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-var toString = {}.toString;
+"use strict";
 
-module.exports = Array.isArray || function (arr) {
-  return toString.call(arr) == '[object Array]';
-};
+
+// A linked list to keep track of recently-used-ness
+const Yallist = __nccwpck_require__(6028)
+
+const MAX = Symbol('max')
+const LENGTH = Symbol('length')
+const LENGTH_CALCULATOR = Symbol('lengthCalculator')
+const ALLOW_STALE = Symbol('allowStale')
+const MAX_AGE = Symbol('maxAge')
+const DISPOSE = Symbol('dispose')
+const NO_DISPOSE_ON_SET = Symbol('noDisposeOnSet')
+const LRU_LIST = Symbol('lruList')
+const CACHE = Symbol('cache')
+const UPDATE_AGE_ON_GET = Symbol('updateAgeOnGet')
+
+const naiveLength = () => 1
+
+// lruList is a yallist where the head is the youngest
+// item, and the tail is the oldest.  the list contains the Hit
+// objects as the entries.
+// Each Hit object has a reference to its Yallist.Node.  This
+// never changes.
+//
+// cache is a Map (or PseudoMap) that matches the keys to
+// the Yallist.Node object.
+class LRUCache {
+  constructor (options) {
+    if (typeof options === 'number')
+      options = { max: options }
+
+    if (!options)
+      options = {}
+
+    if (options.max && (typeof options.max !== 'number' || options.max < 0))
+      throw new TypeError('max must be a non-negative number')
+    // Kind of weird to have a default max of Infinity, but oh well.
+    const max = this[MAX] = options.max || Infinity
+
+    const lc = options.length || naiveLength
+    this[LENGTH_CALCULATOR] = (typeof lc !== 'function') ? naiveLength : lc
+    this[ALLOW_STALE] = options.stale || false
+    if (options.maxAge && typeof options.maxAge !== 'number')
+      throw new TypeError('maxAge must be a number')
+    this[MAX_AGE] = options.maxAge || 0
+    this[DISPOSE] = options.dispose
+    this[NO_DISPOSE_ON_SET] = options.noDisposeOnSet || false
+    this[UPDATE_AGE_ON_GET] = options.updateAgeOnGet || false
+    this.reset()
+  }
+
+  // resize the cache when the max changes.
+  set max (mL) {
+    if (typeof mL !== 'number' || mL < 0)
+      throw new TypeError('max must be a non-negative number')
+
+    this[MAX] = mL || Infinity
+    trim(this)
+  }
+  get max () {
+    return this[MAX]
+  }
+
+  set allowStale (allowStale) {
+    this[ALLOW_STALE] = !!allowStale
+  }
+  get allowStale () {
+    return this[ALLOW_STALE]
+  }
+
+  set maxAge (mA) {
+    if (typeof mA !== 'number')
+      throw new TypeError('maxAge must be a non-negative number')
+
+    this[MAX_AGE] = mA
+    trim(this)
+  }
+  get maxAge () {
+    return this[MAX_AGE]
+  }
+
+  // resize the cache when the lengthCalculator changes.
+  set lengthCalculator (lC) {
+    if (typeof lC !== 'function')
+      lC = naiveLength
+
+    if (lC !== this[LENGTH_CALCULATOR]) {
+      this[LENGTH_CALCULATOR] = lC
+      this[LENGTH] = 0
+      this[LRU_LIST].forEach(hit => {
+        hit.length = this[LENGTH_CALCULATOR](hit.value, hit.key)
+        this[LENGTH] += hit.length
+      })
+    }
+    trim(this)
+  }
+  get lengthCalculator () { return this[LENGTH_CALCULATOR] }
+
+  get length () { return this[LENGTH] }
+  get itemCount () { return this[LRU_LIST].length }
+
+  rforEach (fn, thisp) {
+    thisp = thisp || this
+    for (let walker = this[LRU_LIST].tail; walker !== null;) {
+      const prev = walker.prev
+      forEachStep(this, fn, walker, thisp)
+      walker = prev
+    }
+  }
+
+  forEach (fn, thisp) {
+    thisp = thisp || this
+    for (let walker = this[LRU_LIST].head; walker !== null;) {
+      const next = walker.next
+      forEachStep(this, fn, walker, thisp)
+      walker = next
+    }
+  }
+
+  keys () {
+    return this[LRU_LIST].toArray().map(k => k.key)
+  }
+
+  values () {
+    return this[LRU_LIST].toArray().map(k => k.value)
+  }
+
+  reset () {
+    if (this[DISPOSE] &&
+        this[LRU_LIST] &&
+        this[LRU_LIST].length) {
+      this[LRU_LIST].forEach(hit => this[DISPOSE](hit.key, hit.value))
+    }
+
+    this[CACHE] = new Map() // hash of items by key
+    this[LRU_LIST] = new Yallist() // list of items in order of use recency
+    this[LENGTH] = 0 // length of items in the list
+  }
+
+  dump () {
+    return this[LRU_LIST].map(hit =>
+      isStale(this, hit) ? false : {
+        k: hit.key,
+        v: hit.value,
+        e: hit.now + (hit.maxAge || 0)
+      }).toArray().filter(h => h)
+  }
+
+  dumpLru () {
+    return this[LRU_LIST]
+  }
+
+  set (key, value, maxAge) {
+    maxAge = maxAge || this[MAX_AGE]
+
+    if (maxAge && typeof maxAge !== 'number')
+      throw new TypeError('maxAge must be a number')
+
+    const now = maxAge ? Date.now() : 0
+    const len = this[LENGTH_CALCULATOR](value, key)
+
+    if (this[CACHE].has(key)) {
+      if (len > this[MAX]) {
+        del(this, this[CACHE].get(key))
+        return false
+      }
+
+      const node = this[CACHE].get(key)
+      const item = node.value
+
+      // dispose of the old one before overwriting
+      // split out into 2 ifs for better coverage tracking
+      if (this[DISPOSE]) {
+        if (!this[NO_DISPOSE_ON_SET])
+          this[DISPOSE](key, item.value)
+      }
+
+      item.now = now
+      item.maxAge = maxAge
+      item.value = value
+      this[LENGTH] += len - item.length
+      item.length = len
+      this.get(key)
+      trim(this)
+      return true
+    }
+
+    const hit = new Entry(key, value, len, now, maxAge)
+
+    // oversized objects fall out of cache automatically.
+    if (hit.length > this[MAX]) {
+      if (this[DISPOSE])
+        this[DISPOSE](key, value)
+
+      return false
+    }
+
+    this[LENGTH] += hit.length
+    this[LRU_LIST].unshift(hit)
+    this[CACHE].set(key, this[LRU_LIST].head)
+    trim(this)
+    return true
+  }
+
+  has (key) {
+    if (!this[CACHE].has(key)) return false
+    const hit = this[CACHE].get(key).value
+    return !isStale(this, hit)
+  }
+
+  get (key) {
+    return get(this, key, true)
+  }
+
+  peek (key) {
+    return get(this, key, false)
+  }
+
+  pop () {
+    const node = this[LRU_LIST].tail
+    if (!node)
+      return null
+
+    del(this, node)
+    return node.value
+  }
+
+  del (key) {
+    del(this, this[CACHE].get(key))
+  }
+
+  load (arr) {
+    // reset the cache
+    this.reset()
+
+    const now = Date.now()
+    // A previous serialized cache has the most recent items first
+    for (let l = arr.length - 1; l >= 0; l--) {
+      const hit = arr[l]
+      const expiresAt = hit.e || 0
+      if (expiresAt === 0)
+        // the item was created without expiration in a non aged cache
+        this.set(hit.k, hit.v)
+      else {
+        const maxAge = expiresAt - now
+        // dont add already expired items
+        if (maxAge > 0) {
+          this.set(hit.k, hit.v, maxAge)
+        }
+      }
+    }
+  }
+
+  prune () {
+    this[CACHE].forEach((value, key) => get(this, key, false))
+  }
+}
+
+const get = (self, key, doUse) => {
+  const node = self[CACHE].get(key)
+  if (node) {
+    const hit = node.value
+    if (isStale(self, hit)) {
+      del(self, node)
+      if (!self[ALLOW_STALE])
+        return undefined
+    } else {
+      if (doUse) {
+        if (self[UPDATE_AGE_ON_GET])
+          node.value.now = Date.now()
+        self[LRU_LIST].unshiftNode(node)
+      }
+    }
+    return hit.value
+  }
+}
+
+const isStale = (self, hit) => {
+  if (!hit || (!hit.maxAge && !self[MAX_AGE]))
+    return false
+
+  const diff = Date.now() - hit.now
+  return hit.maxAge ? diff > hit.maxAge
+    : self[MAX_AGE] && (diff > self[MAX_AGE])
+}
+
+const trim = self => {
+  if (self[LENGTH] > self[MAX]) {
+    for (let walker = self[LRU_LIST].tail;
+      self[LENGTH] > self[MAX] && walker !== null;) {
+      // We know that we're about to delete this one, and also
+      // what the next least recently used key will be, so just
+      // go ahead and set it now.
+      const prev = walker.prev
+      del(self, walker)
+      walker = prev
+    }
+  }
+}
+
+const del = (self, node) => {
+  if (node) {
+    const hit = node.value
+    if (self[DISPOSE])
+      self[DISPOSE](hit.key, hit.value)
+
+    self[LENGTH] -= hit.length
+    self[CACHE].delete(hit.key)
+    self[LRU_LIST].removeNode(node)
+  }
+}
+
+class Entry {
+  constructor (key, value, length, now, maxAge) {
+    this.key = key
+    this.value = value
+    this.length = length
+    this.now = now
+    this.maxAge = maxAge || 0
+  }
+}
+
+const forEachStep = (self, fn, node, thisp) => {
+  let hit = node.value
+  if (isStale(self, hit)) {
+    del(self, node)
+    if (!self[ALLOW_STALE])
+      hit = undefined
+  }
+  if (hit)
+    fn.call(thisp, hit.value, hit.key, self)
+}
+
+module.exports = LRUCache
 
 
 /***/ }),
@@ -8246,10 +9783,10 @@ module.exports = Array.isArray || function (arr) {
 module.exports = minimatch
 minimatch.Minimatch = Minimatch
 
-var path = { sep: '/' }
-try {
-  path = __nccwpck_require__(5622)
-} catch (er) {}
+var path = (function () { try { return __nccwpck_require__(5622) } catch (e) {}}()) || {
+  sep: '/'
+}
+minimatch.sep = path.sep
 
 var GLOBSTAR = minimatch.GLOBSTAR = Minimatch.GLOBSTAR = {}
 var expand = __nccwpck_require__(1400)
@@ -8301,43 +9838,64 @@ function filter (pattern, options) {
 }
 
 function ext (a, b) {
-  a = a || {}
   b = b || {}
   var t = {}
-  Object.keys(b).forEach(function (k) {
-    t[k] = b[k]
-  })
   Object.keys(a).forEach(function (k) {
     t[k] = a[k]
+  })
+  Object.keys(b).forEach(function (k) {
+    t[k] = b[k]
   })
   return t
 }
 
 minimatch.defaults = function (def) {
-  if (!def || !Object.keys(def).length) return minimatch
+  if (!def || typeof def !== 'object' || !Object.keys(def).length) {
+    return minimatch
+  }
 
   var orig = minimatch
 
   var m = function minimatch (p, pattern, options) {
-    return orig.minimatch(p, pattern, ext(def, options))
+    return orig(p, pattern, ext(def, options))
   }
 
   m.Minimatch = function Minimatch (pattern, options) {
     return new orig.Minimatch(pattern, ext(def, options))
+  }
+  m.Minimatch.defaults = function defaults (options) {
+    return orig.defaults(ext(def, options)).Minimatch
+  }
+
+  m.filter = function filter (pattern, options) {
+    return orig.filter(pattern, ext(def, options))
+  }
+
+  m.defaults = function defaults (options) {
+    return orig.defaults(ext(def, options))
+  }
+
+  m.makeRe = function makeRe (pattern, options) {
+    return orig.makeRe(pattern, ext(def, options))
+  }
+
+  m.braceExpand = function braceExpand (pattern, options) {
+    return orig.braceExpand(pattern, ext(def, options))
+  }
+
+  m.match = function (list, pattern, options) {
+    return orig.match(list, pattern, ext(def, options))
   }
 
   return m
 }
 
 Minimatch.defaults = function (def) {
-  if (!def || !Object.keys(def).length) return Minimatch
   return minimatch.defaults(def).Minimatch
 }
 
 function minimatch (p, pattern, options) {
-  if (typeof pattern !== 'string') {
-    throw new TypeError('glob pattern string required')
-  }
+  assertValidPattern(pattern)
 
   if (!options) options = {}
 
@@ -8345,9 +9903,6 @@ function minimatch (p, pattern, options) {
   if (!options.nocomment && pattern.charAt(0) === '#') {
     return false
   }
-
-  // "" only matches ""
-  if (pattern.trim() === '') return p === ''
 
   return new Minimatch(pattern, options).match(p)
 }
@@ -8357,15 +9912,14 @@ function Minimatch (pattern, options) {
     return new Minimatch(pattern, options)
   }
 
-  if (typeof pattern !== 'string') {
-    throw new TypeError('glob pattern string required')
-  }
+  assertValidPattern(pattern)
 
   if (!options) options = {}
+
   pattern = pattern.trim()
 
   // windows support: need to use /, not \
-  if (path.sep !== '/') {
+  if (!options.allowWindowsEscape && path.sep !== '/') {
     pattern = pattern.split(path.sep).join('/')
   }
 
@@ -8376,6 +9930,7 @@ function Minimatch (pattern, options) {
   this.negate = false
   this.comment = false
   this.empty = false
+  this.partial = !!options.partial
 
   // make the set of regexps etc.
   this.make()
@@ -8385,9 +9940,6 @@ Minimatch.prototype.debug = function () {}
 
 Minimatch.prototype.make = make
 function make () {
-  // don't do it more than once.
-  if (this._made) return
-
   var pattern = this.pattern
   var options = this.options
 
@@ -8407,7 +9959,7 @@ function make () {
   // step 2: expand braces
   var set = this.globSet = this.braceExpand()
 
-  if (options.debug) this.debug = console.error
+  if (options.debug) this.debug = function debug() { console.error.apply(console, arguments) }
 
   this.debug(this.pattern, set)
 
@@ -8487,17 +10039,27 @@ function braceExpand (pattern, options) {
   pattern = typeof pattern === 'undefined'
     ? this.pattern : pattern
 
-  if (typeof pattern === 'undefined') {
-    throw new TypeError('undefined pattern')
-  }
+  assertValidPattern(pattern)
 
-  if (options.nobrace ||
-    !pattern.match(/\{.*\}/)) {
+  // Thanks to Yeting Li <https://github.com/yetingli> for
+  // improving this regexp to avoid a ReDOS vulnerability.
+  if (options.nobrace || !/\{(?:(?!\{).)*\}/.test(pattern)) {
     // shortcut. no need to expand.
     return [pattern]
   }
 
   return expand(pattern)
+}
+
+var MAX_PATTERN_LENGTH = 1024 * 64
+var assertValidPattern = function (pattern) {
+  if (typeof pattern !== 'string') {
+    throw new TypeError('invalid pattern')
+  }
+
+  if (pattern.length > MAX_PATTERN_LENGTH) {
+    throw new TypeError('pattern is too long')
+  }
 }
 
 // parse a component of the expanded set.
@@ -8514,14 +10076,17 @@ function braceExpand (pattern, options) {
 Minimatch.prototype.parse = parse
 var SUBPARSE = {}
 function parse (pattern, isSub) {
-  if (pattern.length > 1024 * 64) {
-    throw new TypeError('pattern is too long')
-  }
+  assertValidPattern(pattern)
 
   var options = this.options
 
   // shortcuts
-  if (!options.noglobstar && pattern === '**') return GLOBSTAR
+  if (pattern === '**') {
+    if (!options.noglobstar)
+      return GLOBSTAR
+    else
+      pattern = '*'
+  }
   if (pattern === '') return ''
 
   var re = ''
@@ -8577,10 +10142,12 @@ function parse (pattern, isSub) {
     }
 
     switch (c) {
-      case '/':
+      /* istanbul ignore next */
+      case '/': {
         // completely not allowed, even escaped.
         // Should already be path-split by now.
         return false
+      }
 
       case '\\':
         clearStateChar()
@@ -8699,25 +10266,23 @@ function parse (pattern, isSub) {
 
         // handle the case where we left a class open.
         // "[z-a]" is valid, equivalent to "\[z-a\]"
-        if (inClass) {
-          // split where the last [ was, make sure we don't have
-          // an invalid re. if so, re-walk the contents of the
-          // would-be class to re-translate any characters that
-          // were passed through as-is
-          // TODO: It would probably be faster to determine this
-          // without a try/catch and a new RegExp, but it's tricky
-          // to do safely.  For now, this is safe and works.
-          var cs = pattern.substring(classStart + 1, i)
-          try {
-            RegExp('[' + cs + ']')
-          } catch (er) {
-            // not a valid class!
-            var sp = this.parse(cs, SUBPARSE)
-            re = re.substr(0, reClassStart) + '\\[' + sp[0] + '\\]'
-            hasMagic = hasMagic || sp[1]
-            inClass = false
-            continue
-          }
+        // split where the last [ was, make sure we don't have
+        // an invalid re. if so, re-walk the contents of the
+        // would-be class to re-translate any characters that
+        // were passed through as-is
+        // TODO: It would probably be faster to determine this
+        // without a try/catch and a new RegExp, but it's tricky
+        // to do safely.  For now, this is safe and works.
+        var cs = pattern.substring(classStart + 1, i)
+        try {
+          RegExp('[' + cs + ']')
+        } catch (er) {
+          // not a valid class!
+          var sp = this.parse(cs, SUBPARSE)
+          re = re.substr(0, reClassStart) + '\\[' + sp[0] + '\\]'
+          hasMagic = hasMagic || sp[1]
+          inClass = false
+          continue
         }
 
         // finish up the class.
@@ -8801,9 +10366,7 @@ function parse (pattern, isSub) {
   // something that could conceivably capture a dot
   var addPatternStart = false
   switch (re.charAt(0)) {
-    case '.':
-    case '[':
-    case '(': addPatternStart = true
+    case '[': case '.': case '(': addPatternStart = true
   }
 
   // Hack to work around lack of negative lookbehind in JS
@@ -8865,7 +10428,7 @@ function parse (pattern, isSub) {
   var flags = options.nocase ? 'i' : ''
   try {
     var regExp = new RegExp('^' + re + '$', flags)
-  } catch (er) {
+  } catch (er) /* istanbul ignore next - should be impossible */ {
     // If it was an invalid regular expression, then it can't match
     // anything.  This trick looks for a character after the end of
     // the string, which is of course impossible, except in multi-line
@@ -8923,7 +10486,7 @@ function makeRe () {
 
   try {
     this.regexp = new RegExp(re, flags)
-  } catch (ex) {
+  } catch (ex) /* istanbul ignore next - should be impossible */ {
     this.regexp = false
   }
   return this.regexp
@@ -8941,8 +10504,8 @@ minimatch.match = function (list, pattern, options) {
   return list
 }
 
-Minimatch.prototype.match = match
-function match (f, partial) {
+Minimatch.prototype.match = function match (f, partial) {
+  if (typeof partial === 'undefined') partial = this.partial
   this.debug('match', f, this.pattern)
   // short-circuit in the case of busted things.
   // comments, etc.
@@ -9024,6 +10587,7 @@ Minimatch.prototype.matchOne = function (file, pattern, partial) {
 
     // should be impossible.
     // some invalid regexp stuff in the set.
+    /* istanbul ignore if */
     if (p === false) return false
 
     if (p === GLOBSTAR) {
@@ -9097,6 +10661,7 @@ Minimatch.prototype.matchOne = function (file, pattern, partial) {
       // no match was found.
       // However, in partial mode, we can't say this is necessarily over.
       // If there's more *pattern* left, then
+      /* istanbul ignore if */
       if (partial) {
         // ran out of file
         this.debug('\n>>> no match, partial?', file, fr, pattern, pr)
@@ -9110,11 +10675,7 @@ Minimatch.prototype.matchOne = function (file, pattern, partial) {
     // patterns with magic have been turned into regexps.
     var hit
     if (typeof p === 'string') {
-      if (options.nocase) {
-        hit = f.toLowerCase() === p.toLowerCase()
-      } else {
-        hit = f === p
-      }
+      hit = f === p
       this.debug('string match', p, f, hit)
     } else {
       hit = f.match(p)
@@ -9145,16 +10706,16 @@ Minimatch.prototype.matchOne = function (file, pattern, partial) {
     // this is ok if we're doing the match as part of
     // a glob fs traversal.
     return partial
-  } else if (pi === pl) {
+  } else /* istanbul ignore else */ if (pi === pl) {
     // ran out of pattern, still have file left.
     // this is only acceptable if we're on the very last
     // empty segment of a file with a trailing slash.
     // a/* should match a/b/
-    var emptyFileEnd = (fi === fl - 1) && (file[fi] === '')
-    return emptyFileEnd
+    return (fi === fl - 1) && (file[fi] === '')
   }
 
   // should be unreachable.
+  /* istanbul ignore next */
   throw new Error('wtf?')
 }
 
@@ -9183,7 +10744,7 @@ function _interopDefault (ex) { return (ex && (typeof ex === 'object') && 'defau
 var Stream = _interopDefault(__nccwpck_require__(2413));
 var http = _interopDefault(__nccwpck_require__(8605));
 var Url = _interopDefault(__nccwpck_require__(8835));
-var https = _interopDefault(__nccwpck_require__(7211));
+var https = _interopDefault(__nccwpck_require__(3034));
 var zlib = _interopDefault(__nccwpck_require__(8761));
 
 // Based on https://github.com/tmpvar/jsdom/blob/aa85b2abf07766ff7bf5c1f6daafb3726f2f2db5/lib/jsdom/living/blob.js
@@ -10827,806 +12388,6 @@ exports.FetchError = FetchError;
 
 /***/ }),
 
-/***/ 7796:
-/***/ ((module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-/**
- * Module exports.
- */
-
-module.exports = exports;
-
-/**
- * Module dependencies.
- */
-
-var fs = __nccwpck_require__(5747);
-var path = __nccwpck_require__(5622);
-var nopt = __nccwpck_require__(3865);
-var log = __nccwpck_require__(5385);
-log.disableProgress();
-var napi = __nccwpck_require__(3565);
-
-var EE = __nccwpck_require__(8614).EventEmitter;
-var inherits = __nccwpck_require__(1669).inherits;
-var commands = [
-      'clean',
-      'install',
-      'reinstall',
-      'build',
-      'rebuild',
-      'package',
-      'testpackage',
-      'publish',
-      'unpublish',
-      'info',
-      'testbinary',
-      'reveal',
-      'configure'
-    ];
-var aliases = {};
-
-// differentiate node-pre-gyp's logs from npm's
-log.heading = 'node-pre-gyp';
-
-exports.find = __nccwpck_require__(1128).find;
-
-function Run() {
-  var self = this;
-
-  this.commands = {};
-
-  commands.forEach(function (command) {
-    self.commands[command] = function (argv, callback) {
-      log.verbose('command', command, argv);
-      return require('./' + command)(self, argv, callback);
-    };
-  });
-}
-inherits(Run, EE);
-exports.Run = Run;
-var proto = Run.prototype;
-
-/**
- * Export the contents of the package.json.
- */
-
-proto.package = __nccwpck_require__(6398);
-
-/**
- * nopt configuration definitions
- */
-
-proto.configDefs = {
-    help: Boolean,     // everywhere
-    arch: String,      // 'configure'
-    debug: Boolean,    // 'build'
-    directory: String, // bin
-    proxy: String,     // 'install'
-    loglevel: String,  // everywhere
-};
-
-/**
- * nopt shorthands
- */
-
-proto.shorthands = {
-    release: '--no-debug',
-    C: '--directory',
-    debug: '--debug',
-    j: '--jobs',
-    silent: '--loglevel=silent',
-    silly: '--loglevel=silly',
-    verbose: '--loglevel=verbose',
-};
-
-/**
- * expose the command aliases for the bin file to use.
- */
-
-proto.aliases = aliases;
-
-/**
- * Parses the given argv array and sets the 'opts',
- * 'argv' and 'command' properties.
- */
-
-proto.parseArgv = function parseOpts (argv) {
-  this.opts = nopt(this.configDefs, this.shorthands, argv);
-  this.argv = this.opts.argv.remain.slice();
-  var commands = this.todo = [];
-
-  // create a copy of the argv array with aliases mapped
-  argv = this.argv.map(function (arg) {
-    // is this an alias?
-    if (arg in this.aliases) {
-      arg = this.aliases[arg];
-    }
-    return arg;
-  }, this);
-
-  // process the mapped args into "command" objects ("name" and "args" props)
-  argv.slice().forEach(function (arg) {
-    if (arg in this.commands) {
-      var args = argv.splice(0, argv.indexOf(arg));
-      argv.shift();
-      if (commands.length > 0) {
-        commands[commands.length - 1].args = args;
-      }
-      commands.push({ name: arg, args: [] });
-    }
-  }, this);
-  if (commands.length > 0) {
-    commands[commands.length - 1].args = argv.splice(0);
-  }
-
-  // expand commands entries for multiple napi builds
-  var dir = this.opts.directory;
-  if (dir == null) dir = process.cwd();
-  var package_json = JSON.parse(fs.readFileSync(path.join(dir,'package.json')));
-
-  this.todo = napi.expand_commands (package_json, this.opts, commands);
-
-  // support for inheriting config env variables from npm
-  var npm_config_prefix = 'npm_config_';
-  Object.keys(process.env).forEach(function (name) {
-    if (name.indexOf(npm_config_prefix) !== 0) return;
-    var val = process.env[name];
-    if (name === npm_config_prefix + 'loglevel') {
-      log.level = val;
-    } else {
-      // add the user-defined options to the config
-      name = name.substring(npm_config_prefix.length);
-      // avoid npm argv clobber already present args
-      // which avoids problem of 'npm test' calling
-      // script that runs unique npm install commands
-      if (name === 'argv') {
-         if (this.opts.argv &&
-             this.opts.argv.remain &&
-             this.opts.argv.remain.length) {
-            // do nothing
-         } else {
-            this.opts[name] = val;
-         }
-      } else {
-        this.opts[name] = val;
-      }
-    }
-  }, this);
-
-  if (this.opts.loglevel) {
-    log.level = this.opts.loglevel;
-  }
-  log.resume();
-};
-
-/**
- * Returns the usage instructions for node-pre-gyp.
- */
-
-proto.usage = function usage () {
-  var str = [
-      '',
-      '  Usage: node-pre-gyp <command> [options]',
-      '',
-      '  where <command> is one of:',
-      commands.map(function (c) {
-        return '    - ' + c + ' - ' + require('./' + c).usage;
-      }).join('\n'),
-      '',
-      'node-pre-gyp@' + this.version + '  ' + path.resolve(__dirname, '..'),
-      'node@' + process.versions.node
-  ].join('\n');
-  return str;
-};
-
-/**
- * Version number getter.
- */
-
-Object.defineProperty(proto, 'version', {
-    get: function () {
-      return this.package.version;
-    },
-    enumerable: true
-});
-
-
-
-/***/ }),
-
-/***/ 1128:
-/***/ ((module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-var versioning = __nccwpck_require__(5625);
-var napi = __nccwpck_require__(3565);
-var existsSync = __nccwpck_require__(5747).existsSync || __nccwpck_require__(5622).existsSync;
-var path = __nccwpck_require__(5622);
-
-module.exports = exports;
-
-exports.usage = 'Finds the require path for the node-pre-gyp installed module';
-
-exports.validate = function(package_json,opts) {
-    versioning.validate_config(package_json,opts);
-};
-
-exports.find = function(package_json_path,opts) {
-   if (!existsSync(package_json_path)) {
-        throw new Error("package.json does not exist at " + package_json_path);
-   }
-   var package_json = require(package_json_path);
-   versioning.validate_config(package_json,opts);
-   var napi_build_version;
-   if (napi.get_napi_build_versions (package_json, opts)) {
-       napi_build_version = napi.get_best_napi_build_version(package_json, opts);
-   }
-   opts = opts || {};
-   if (!opts.module_root) opts.module_root = path.dirname(package_json_path);
-   var meta = versioning.evaluate(package_json,opts,napi_build_version);
-   return meta.module;
-};
-
-
-/***/ }),
-
-/***/ 3565:
-/***/ ((module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-var fs = __nccwpck_require__(5747);
-
-module.exports = exports;
-
-var versionArray = process.version
-	.substr(1)
-	.replace(/-.*$/, '')
-	.split('.')
-	.map(function(item) {
-		return +item;
-	});
-
-var napi_multiple_commands = [
-	'build',
-	'clean',
-	'configure',
-	'package',
-	'publish',
-	'reveal',
-	'testbinary',
-	'testpackage',
-	'unpublish'
-];
-
-var napi_build_version_tag = 'napi_build_version=';
-
-module.exports.get_napi_version = function(target) { // target may be undefined
-	// returns the non-zero numeric napi version or undefined if napi is not supported.
-	// correctly supporting target requires an updated cross-walk
-	var version = process.versions.napi; // can be undefined
-	if (!version) { // this code should never need to be updated
-		if (versionArray[0] === 9 && versionArray[1] >= 3) version = 2; // 9.3.0+
-		else if (versionArray[0] === 8) version = 1; // 8.0.0+
-	}
-	return version;
-};
-
-module.exports.get_napi_version_as_string = function(target) {
-	// returns the napi version as a string or an empty string if napi is not supported.
-	var version = module.exports.get_napi_version(target);
-	return version ? ''+version : '';
-};
-
-module.exports.validate_package_json = function(package_json, opts) { // throws Error
-
-	var binary = package_json.binary;
-	var module_path_ok = pathOK(binary.module_path);
-	var remote_path_ok = pathOK(binary.remote_path);
-	var package_name_ok = pathOK(binary.package_name);
-	var napi_build_versions = module.exports.get_napi_build_versions(package_json,opts,true);
-	var napi_build_versions_raw = module.exports.get_napi_build_versions_raw(package_json);
-
-	if (napi_build_versions) {
-		napi_build_versions.forEach(function(napi_build_version){
-			if (!(parseInt(napi_build_version,10) === napi_build_version && napi_build_version > 0)) {
-				throw new Error("All values specified in napi_versions must be positive integers.");
-			}
-		});
-	}
-
-	if (napi_build_versions && (!module_path_ok || (!remote_path_ok && !package_name_ok))) {
-		throw new Error("When napi_versions is specified; module_path and either remote_path or " +
-			"package_name must contain the substitution string '{napi_build_version}`.");
-	}
-
-	if ((module_path_ok || remote_path_ok || package_name_ok) && !napi_build_versions_raw) {
-		throw new Error("When the substitution string '{napi_build_version}` is specified in " +
-			"module_path, remote_path, or package_name; napi_versions must also be specified.");
-	}
-
-	if (napi_build_versions && !module.exports.get_best_napi_build_version(package_json, opts) && 
-	module.exports.build_napi_only(package_json)) {
-		throw new Error(
-			'The N-API version of this Node instance is ' + module.exports.get_napi_version(opts ? opts.target : undefined) + '. ' +
-			'This module supports N-API version(s) ' + module.exports.get_napi_build_versions_raw(package_json) + '. ' +
-			'This Node instance cannot run this module.');
-	}
-
-	if (napi_build_versions_raw && !napi_build_versions && module.exports.build_napi_only(package_json)) {
-		throw new Error(
-			'The N-API version of this Node instance is ' + module.exports.get_napi_version(opts ? opts.target : undefined) + '. ' +
-			'This module supports N-API version(s) ' + module.exports.get_napi_build_versions_raw(package_json) + '. ' +
-			'This Node instance cannot run this module.');
-	}
-
-};
-
-function pathOK (path) {
-	return path && (path.indexOf('{napi_build_version}') !== -1 || path.indexOf('{node_napi_label}') !== -1);
-}
-
-module.exports.expand_commands = function(package_json, opts, commands) {
-	var expanded_commands = [];
-	var napi_build_versions = module.exports.get_napi_build_versions(package_json, opts);
-	commands.forEach(function(command){
-		if (napi_build_versions && command.name === 'install') {
-			var napi_build_version = module.exports.get_best_napi_build_version(package_json, opts);
-			var args = napi_build_version ? [ napi_build_version_tag+napi_build_version ] : [ ];
-			expanded_commands.push ({ name: command.name, args: args });
-		} else if (napi_build_versions && napi_multiple_commands.indexOf(command.name) !== -1) {
-			napi_build_versions.forEach(function(napi_build_version){
-				var args = command.args.slice();
-				args.push (napi_build_version_tag+napi_build_version);
-				expanded_commands.push ({ name: command.name, args: args });
-			});
-		} else {
-			expanded_commands.push (command);
-		}
-	});
-	return expanded_commands;
-};
-
-module.exports.get_napi_build_versions = function(package_json, opts, warnings) { // opts may be undefined
-	var log = __nccwpck_require__(5385);
-	var napi_build_versions = [];
-	var supported_napi_version = module.exports.get_napi_version(opts ? opts.target : undefined);
-	// remove duplicates, verify each napi version can actaully be built
-	if (package_json.binary && package_json.binary.napi_versions) {
-		package_json.binary.napi_versions.forEach(function(napi_version) {
-			var duplicated = napi_build_versions.indexOf(napi_version) !== -1;
-			if (!duplicated && supported_napi_version && napi_version <= supported_napi_version) {
-				napi_build_versions.push(napi_version);
-			} else if (warnings && !duplicated && supported_napi_version) {
-				log.info('This Node instance does not support builds for N-API version', napi_version);
-			}
-		});
-	}
-	if (opts && opts["build-latest-napi-version-only"]) {
-		var latest_version = 0;
-		napi_build_versions.forEach(function(napi_version) {
-			if (napi_version > latest_version) latest_version = napi_version;
-		});
-		napi_build_versions = latest_version ? [ latest_version ] : [];
-	}
-	return napi_build_versions.length ? napi_build_versions : undefined;
-};
-
-module.exports.get_napi_build_versions_raw = function(package_json) {
-	var napi_build_versions = [];
-	// remove duplicates
-	if (package_json.binary && package_json.binary.napi_versions) {
-		package_json.binary.napi_versions.forEach(function(napi_version) {
-			if (napi_build_versions.indexOf(napi_version) === -1) {
-				napi_build_versions.push(napi_version);
-			}
-		});
-	}
-	return napi_build_versions.length ? napi_build_versions : undefined;
-};
-
-module.exports.get_command_arg = function(napi_build_version) {
-	return napi_build_version_tag + napi_build_version;
-};
-
-module.exports.get_napi_build_version_from_command_args = function(command_args) {
-	for (var i = 0; i < command_args.length; i++) {
-		var arg = command_args[i];
-		if (arg.indexOf(napi_build_version_tag) === 0) {
-			return parseInt(arg.substr(napi_build_version_tag.length),10);
-		}
-	}
-	return undefined;
-};
-
-module.exports.swap_build_dir_out = function(napi_build_version) {
-	if (napi_build_version) {
-		var rm = __nccwpck_require__(2450);
-		rm.sync(module.exports.get_build_dir(napi_build_version));
-		fs.renameSync('build', module.exports.get_build_dir(napi_build_version));
-	}
-};
-
-module.exports.swap_build_dir_in = function(napi_build_version) {
-	if (napi_build_version) {
-		var rm = __nccwpck_require__(2450);
-		rm.sync('build');
-		fs.renameSync(module.exports.get_build_dir(napi_build_version), 'build');
-	}
-};
-
-module.exports.get_build_dir = function(napi_build_version) {
-	return 'build-tmp-napi-v'+napi_build_version;
-};
-
-module.exports.get_best_napi_build_version = function(package_json, opts) {
-	var best_napi_build_version = 0;
-	var napi_build_versions = module.exports.get_napi_build_versions (package_json, opts);
-	if (napi_build_versions) {
-		var our_napi_version = module.exports.get_napi_version(opts ? opts.target : undefined);
-		napi_build_versions.forEach(function(napi_build_version){
-			if (napi_build_version > best_napi_build_version &&
-				napi_build_version <= our_napi_version) {
-				best_napi_build_version = napi_build_version;
-			}
-		});
-	}
-	return best_napi_build_version === 0 ? undefined : best_napi_build_version;
-};
-
-module.exports.build_napi_only = function(package_json) {
-	return package_json.binary && package_json.binary.package_name && 
-	package_json.binary.package_name.indexOf('{node_napi_label}') === -1;
-};
-
-/***/ }),
-
-/***/ 5625:
-/***/ ((module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-module.exports = exports;
-
-var path = __nccwpck_require__(5622);
-var semver = __nccwpck_require__(4834);
-var url = __nccwpck_require__(8835);
-var detect_libc = __nccwpck_require__(4549);
-var napi = __nccwpck_require__(3565);
-
-var abi_crosswalk;
-
-// This is used for unit testing to provide a fake
-// ABI crosswalk that emulates one that is not updated
-// for the current version
-if (process.env.NODE_PRE_GYP_ABI_CROSSWALK) {
-    abi_crosswalk = require(process.env.NODE_PRE_GYP_ABI_CROSSWALK);
-} else {
-    abi_crosswalk = __nccwpck_require__(282);
-}
-
-var major_versions = {};
-Object.keys(abi_crosswalk).forEach(function(v) {
-    var major = v.split('.')[0];
-    if (!major_versions[major]) {
-        major_versions[major] = v;
-    }
-});
-
-function get_electron_abi(runtime, target_version) {
-    if (!runtime) {
-        throw new Error("get_electron_abi requires valid runtime arg");
-    }
-    if (typeof target_version === 'undefined') {
-        // erroneous CLI call
-        throw new Error("Empty target version is not supported if electron is the target.");
-    }
-    // Electron guarantees that patch version update won't break native modules.
-    var sem_ver = semver.parse(target_version);
-    return runtime + '-v' + sem_ver.major + '.' + sem_ver.minor;
-}
-module.exports.get_electron_abi = get_electron_abi;
-
-function get_node_webkit_abi(runtime, target_version) {
-    if (!runtime) {
-        throw new Error("get_node_webkit_abi requires valid runtime arg");
-    }
-    if (typeof target_version === 'undefined') {
-        // erroneous CLI call
-        throw new Error("Empty target version is not supported if node-webkit is the target.");
-    }
-    return runtime + '-v' + target_version;
-}
-module.exports.get_node_webkit_abi = get_node_webkit_abi;
-
-function get_node_abi(runtime, versions) {
-    if (!runtime) {
-        throw new Error("get_node_abi requires valid runtime arg");
-    }
-    if (!versions) {
-        throw new Error("get_node_abi requires valid process.versions object");
-    }
-    var sem_ver = semver.parse(versions.node);
-    if (sem_ver.major === 0 && sem_ver.minor % 2) { // odd series
-        // https://github.com/mapbox/node-pre-gyp/issues/124
-        return runtime+'-v'+versions.node;
-    } else {
-        // process.versions.modules added in >= v0.10.4 and v0.11.7
-        // https://github.com/joyent/node/commit/ccabd4a6fa8a6eb79d29bc3bbe9fe2b6531c2d8e
-        return versions.modules ? runtime+'-v' + (+versions.modules) :
-            'v8-' + versions.v8.split('.').slice(0,2).join('.');
-    }
-}
-module.exports.get_node_abi = get_node_abi;
-
-function get_runtime_abi(runtime, target_version) {
-    if (!runtime) {
-        throw new Error("get_runtime_abi requires valid runtime arg");
-    }
-    if (runtime === 'node-webkit') {
-        return get_node_webkit_abi(runtime, target_version || process.versions['node-webkit']);
-    } else if (runtime === 'electron') {
-        return get_electron_abi(runtime, target_version || process.versions.electron);
-    } else {
-        if (runtime != 'node') {
-            throw new Error("Unknown Runtime: '" + runtime + "'");
-        }
-        if (!target_version) {
-            return get_node_abi(runtime,process.versions);
-        } else {
-            var cross_obj;
-            // abi_crosswalk generated with ./scripts/abi_crosswalk.js
-            if (abi_crosswalk[target_version]) {
-                cross_obj = abi_crosswalk[target_version];
-            } else {
-                var target_parts = target_version.split('.').map(function(i) { return +i; });
-                if (target_parts.length != 3) { // parse failed
-                    throw new Error("Unknown target version: " + target_version);
-                }
-                /*
-                    The below code tries to infer the last known ABI compatible version
-                    that we have recorded in the abi_crosswalk.json when an exact match
-                    is not possible. The reasons for this to exist are complicated:
-
-                       - We support passing --target to be able to allow developers to package binaries for versions of node
-                         that are not the same one as they are running. This might also be used in combination with the
-                         --target_arch or --target_platform flags to also package binaries for alternative platforms
-                       - When --target is passed we can't therefore determine the ABI (process.versions.modules) from the node
-                         version that is running in memory
-                       - So, therefore node-pre-gyp keeps an "ABI crosswalk" (lib/util/abi_crosswalk.json) to be able to look
-                         this info up for all versions
-                       - But we cannot easily predict what the future ABI will be for released versions
-                       - And node-pre-gyp needs to be a `bundledDependency` in apps that depend on it in order to work correctly
-                         by being fully available at install time.
-                       - So, the speed of node releases and the bundled nature of node-pre-gyp mean that a new node-pre-gyp release
-                         need to happen for every node.js/io.js/node-webkit/nw.js/atom-shell/etc release that might come online if
-                         you want the `--target` flag to keep working for the latest version
-                       - Which is impractical ^^
-                       - Hence the below code guesses about future ABI to make the need to update node-pre-gyp less demanding.
-
-                    In practice then you can have a dependency of your app like `node-sqlite3` that bundles a `node-pre-gyp` that
-                    only knows about node v0.10.33 in the `abi_crosswalk.json` but target node v0.10.34 (which is assumed to be
-                    ABI compatible with v0.10.33).
-
-                    TODO: use semver module instead of custom version parsing
-                */
-                var major = target_parts[0];
-                var minor = target_parts[1];
-                var patch = target_parts[2];
-                // io.js: yeah if node.js ever releases 1.x this will break
-                // but that is unlikely to happen: https://github.com/iojs/io.js/pull/253#issuecomment-69432616
-                if (major === 1) {
-                    // look for last release that is the same major version
-                    // e.g. we assume io.js 1.x is ABI compatible with >= 1.0.0
-                    while (true) {
-                        if (minor > 0) --minor;
-                        if (patch > 0) --patch;
-                        var new_iojs_target = '' + major + '.' + minor + '.' + patch;
-                        if (abi_crosswalk[new_iojs_target]) {
-                            cross_obj = abi_crosswalk[new_iojs_target];
-                            console.log('Warning: node-pre-gyp could not find exact match for ' + target_version);
-                            console.log('Warning: but node-pre-gyp successfully choose ' + new_iojs_target + ' as ABI compatible target');
-                            break;
-                        }
-                        if (minor === 0 && patch === 0) {
-                            break;
-                        }
-                    }
-                } else if (major >= 2) {
-                    // look for last release that is the same major version
-                    if (major_versions[major]) {
-                        cross_obj = abi_crosswalk[major_versions[major]];
-                        console.log('Warning: node-pre-gyp could not find exact match for ' + target_version);
-                        console.log('Warning: but node-pre-gyp successfully choose ' + major_versions[major] + ' as ABI compatible target');
-                    }
-                } else if (major === 0) { // node.js
-                    if (target_parts[1] % 2 === 0) { // for stable/even node.js series
-                        // look for the last release that is the same minor release
-                        // e.g. we assume node 0.10.x is ABI compatible with >= 0.10.0
-                        while (--patch > 0) {
-                            var new_node_target = '' + major + '.' + minor + '.' + patch;
-                            if (abi_crosswalk[new_node_target]) {
-                                cross_obj = abi_crosswalk[new_node_target];
-                                console.log('Warning: node-pre-gyp could not find exact match for ' + target_version);
-                                console.log('Warning: but node-pre-gyp successfully choose ' + new_node_target + ' as ABI compatible target');
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            if (!cross_obj) {
-                throw new Error("Unsupported target version: " + target_version);
-            }
-            // emulate process.versions
-            var versions_obj = {
-                node: target_version,
-                v8: cross_obj.v8+'.0',
-                // abi_crosswalk uses 1 for node versions lacking process.versions.modules
-                // process.versions.modules added in >= v0.10.4 and v0.11.7
-                modules: cross_obj.node_abi > 1 ? cross_obj.node_abi : undefined
-            };
-            return get_node_abi(runtime, versions_obj);
-        }
-    }
-}
-module.exports.get_runtime_abi = get_runtime_abi;
-
-var required_parameters = [
-    'module_name',
-    'module_path',
-    'host'
-];
-
-function validate_config(package_json,opts) {
-    var msg = package_json.name + ' package.json is not node-pre-gyp ready:\n';
-    var missing = [];
-    if (!package_json.main) {
-        missing.push('main');
-    }
-    if (!package_json.version) {
-        missing.push('version');
-    }
-    if (!package_json.name) {
-        missing.push('name');
-    }
-    if (!package_json.binary) {
-        missing.push('binary');
-    }
-    var o = package_json.binary;
-    required_parameters.forEach(function(p) {
-        if (missing.indexOf('binary') > -1) {
-            missing.pop('binary');
-        }
-        if (!o || o[p] === undefined || o[p] === "") {
-            missing.push('binary.' + p);
-        }
-    });
-    if (missing.length >= 1) {
-        throw new Error(msg+"package.json must declare these properties: \n" + missing.join('\n'));
-    }
-    if (o) {
-        // enforce https over http
-        var protocol = url.parse(o.host).protocol;
-        if (protocol === 'http:') {
-            throw new Error("'host' protocol ("+protocol+") is invalid - only 'https:' is accepted");
-        }
-    }
-    napi.validate_package_json(package_json,opts);
-}
-
-module.exports.validate_config = validate_config;
-
-function eval_template(template,opts) {
-    Object.keys(opts).forEach(function(key) {
-        var pattern = '{'+key+'}';
-        while (template.indexOf(pattern) > -1) {
-            template = template.replace(pattern,opts[key]);
-        }
-    });
-    return template;
-}
-
-// url.resolve needs single trailing slash
-// to behave correctly, otherwise a double slash
-// may end up in the url which breaks requests
-// and a lacking slash may not lead to proper joining
-function fix_slashes(pathname) {
-    if (pathname.slice(-1) != '/') {
-        return pathname + '/';
-    }
-    return pathname;
-}
-
-// remove double slashes
-// note: path.normalize will not work because
-// it will convert forward to back slashes
-function drop_double_slashes(pathname) {
-    return pathname.replace(/\/\//g,'/');
-}
-
-function get_process_runtime(versions) {
-    var runtime = 'node';
-    if (versions['node-webkit']) {
-        runtime = 'node-webkit';
-    } else if (versions.electron) {
-        runtime = 'electron';
-    }
-    return runtime;
-}
-
-module.exports.get_process_runtime = get_process_runtime;
-
-var default_package_name = '{module_name}-v{version}-{node_abi}-{platform}-{arch}.tar.gz';
-var default_remote_path = '';
-
-module.exports.evaluate = function(package_json,options,napi_build_version) {
-    options = options || {};
-    validate_config(package_json,options); // options is a suitable substitute for opts in this case
-    var v = package_json.version;
-    var module_version = semver.parse(v);
-    var runtime = options.runtime || get_process_runtime(process.versions);
-    var opts = {
-        name: package_json.name,
-        configuration: Boolean(options.debug) ? 'Debug' : 'Release',
-        debug: options.debug,
-        module_name: package_json.binary.module_name,
-        version: module_version.version,
-        prerelease: module_version.prerelease.length ? module_version.prerelease.join('.') : '',
-        build: module_version.build.length ? module_version.build.join('.') : '',
-        major: module_version.major,
-        minor: module_version.minor,
-        patch: module_version.patch,
-        runtime: runtime,
-        node_abi: get_runtime_abi(runtime,options.target),
-        node_abi_napi: napi.get_napi_version(options.target) ? 'napi' : get_runtime_abi(runtime,options.target),
-        napi_version: napi.get_napi_version(options.target), // non-zero numeric, undefined if unsupported
-        napi_build_version: napi_build_version || '',
-        node_napi_label: napi_build_version ? 'napi-v' + napi_build_version : get_runtime_abi(runtime,options.target),
-        target: options.target || '',
-        platform: options.target_platform || process.platform,
-        target_platform: options.target_platform || process.platform,
-        arch: options.target_arch || process.arch,
-        target_arch: options.target_arch || process.arch,
-        libc: options.target_libc || detect_libc.family || 'unknown',
-        module_main: package_json.main,
-        toolset : options.toolset || '' // address https://github.com/mapbox/node-pre-gyp/issues/119
-    };
-    // support host mirror with npm config `--{module_name}_binary_host_mirror`
-    // e.g.: https://github.com/node-inspector/v8-profiler/blob/master/package.json#L25
-    // > npm install v8-profiler --profiler_binary_host_mirror=https://npm.taobao.org/mirrors/node-inspector/
-    var host = process.env['npm_config_' + opts.module_name + '_binary_host_mirror'] || package_json.binary.host;
-    opts.host = fix_slashes(eval_template(host,opts));
-    opts.module_path = eval_template(package_json.binary.module_path,opts);
-    // now we resolve the module_path to ensure it is absolute so that binding.gyp variables work predictably
-    if (options.module_root) {
-        // resolve relative to known module root: works for pre-binding require
-        opts.module_path = path.join(options.module_root,opts.module_path);
-    } else {
-        // resolve relative to current working directory: works for node-pre-gyp commands
-        opts.module_path = path.resolve(opts.module_path);
-    }
-    opts.module = path.join(opts.module_path,opts.module_name + '.node');
-    opts.remote_path = package_json.binary.remote_path ? drop_double_slashes(fix_slashes(eval_template(package_json.binary.remote_path,opts))) : default_remote_path;
-    var package_name = package_json.binary.package_name ? package_json.binary.package_name : default_package_name;
-    opts.package_name = eval_template(package_name,opts);
-    opts.staged_tarball = path.join('build/stage',opts.remote_path,opts.package_name);
-    opts.hosted_path = url.resolve(opts.host,opts.remote_path);
-    opts.hosted_tarball = url.resolve(opts.hosted_path,opts.package_name);
-    return opts;
-};
-
-
-/***/ }),
-
 /***/ 3865:
 /***/ ((module, exports, __nccwpck_require__) => {
 
@@ -11640,7 +12401,7 @@ var url = __nccwpck_require__(8835)
   , path = __nccwpck_require__(5622)
   , Stream = __nccwpck_require__(2413).Stream
   , abbrev = __nccwpck_require__(9875)
-  , osenv = __nccwpck_require__(6263)
+  , osenv = __nccwpck_require__(275)
 
 module.exports = exports = nopt
 exports.clean = clean
@@ -12080,7 +12841,7 @@ function resolveShort (arg, shorthands, shortAbbr, abbrevs) {
 
 "use strict";
 
-var Progress = __nccwpck_require__(2579)
+var Progress = __nccwpck_require__(8570)
 var Gauge = __nccwpck_require__(2770)
 var EE = __nccwpck_require__(8614).EventEmitter
 var log = exports = module.exports = new EE()
@@ -12094,11 +12855,13 @@ var stream = process.stderr
 Object.defineProperty(log, 'stream', {
   set: function (newStream) {
     stream = newStream
-    if (this.gauge) this.gauge.setWriteTo(stream, stream)
+    if (this.gauge) {
+      this.gauge.setWriteTo(stream, stream)
+    }
   },
   get: function () {
     return stream
-  }
+  },
 })
 
 // by default, decide based on tty-ness.
@@ -12127,8 +12890,8 @@ log.gauge = new Gauge(stream, {
     {type: 'activityIndicator', kerning: 1, length: 1},
     {type: 'section', default: ''},
     ':',
-    {type: 'logline', kerning: 1, default: ''}
-  ]
+    {type: 'logline', kerning: 1, default: ''},
+  ],
 })
 
 log.tracker = new Progress.TrackerGroup()
@@ -12158,15 +12921,23 @@ log.setGaugeTemplate = function (template) {
 }
 
 log.enableProgress = function () {
-  if (this.progressEnabled) return
+  if (this.progressEnabled) {
+    return
+  }
+
   this.progressEnabled = true
   this.tracker.on('change', this.showProgress)
-  if (this._pause) return
+  if (this._paused) {
+    return
+  }
+
   this.gauge.enable()
 }
 
 log.disableProgress = function () {
-  if (!this.progressEnabled) return
+  if (!this.progressEnabled) {
+    return
+  }
   this.progressEnabled = false
   this.tracker.removeListener('change', this.showProgress)
   this.gauge.disable()
@@ -12178,10 +12949,24 @@ var mixinLog = function (tracker) {
   // mixin the public methods from log into the tracker
   // (except: conflicts and one's we handle specially)
   Object.keys(log).forEach(function (P) {
-    if (P[0] === '_') return
-    if (trackerConstructors.filter(function (C) { return C === P }).length) return
-    if (tracker[P]) return
-    if (typeof log[P] !== 'function') return
+    if (P[0] === '_') {
+      return
+    }
+
+    if (trackerConstructors.filter(function (C) {
+      return C === P
+    }).length) {
+      return
+    }
+
+    if (tracker[P]) {
+      return
+    }
+
+    if (typeof log[P] !== 'function') {
+      return
+    }
+
     var func = log[P]
     tracker[P] = function () {
       return func.apply(log, arguments)
@@ -12192,7 +12977,9 @@ var mixinLog = function (tracker) {
   if (tracker instanceof Progress.TrackerGroup) {
     trackerConstructors.forEach(function (C) {
       var func = tracker[C]
-      tracker[C] = function () { return mixinLog(func.apply(tracker, arguments)) }
+      tracker[C] = function () {
+        return mixinLog(func.apply(tracker, arguments))
+      }
     })
   }
   return tracker
@@ -12200,24 +12987,38 @@ var mixinLog = function (tracker) {
 
 // Add tracker constructors to the top level log object
 trackerConstructors.forEach(function (C) {
-  log[C] = function () { return mixinLog(this.tracker[C].apply(this.tracker, arguments)) }
+  log[C] = function () {
+    return mixinLog(this.tracker[C].apply(this.tracker, arguments))
+  }
 })
 
 log.clearProgress = function (cb) {
-  if (!this.progressEnabled) return cb && process.nextTick(cb)
+  if (!this.progressEnabled) {
+    return cb && process.nextTick(cb)
+  }
+
   this.gauge.hide(cb)
 }
 
 log.showProgress = function (name, completed) {
-  if (!this.progressEnabled) return
+  if (!this.progressEnabled) {
+    return
+  }
+
   var values = {}
-  if (name) values.section = name
+  if (name) {
+    values.section = name
+  }
+
   var last = log.record[log.record.length - 1]
   if (last) {
     values.subsection = last.prefix
     var disp = log.disp[last.level] || last.level
     var logline = this._format(disp, log.style[last.level])
-    if (last.prefix) logline += ' ' + this._format(last.prefix, this.prefixStyle)
+    if (last.prefix) {
+      logline += ' ' + this._format(last.prefix, this.prefixStyle)
+    }
+
     logline += ' ' + last.message.split(/\r?\n/)[0]
     values.logline = logline
   }
@@ -12228,11 +13029,16 @@ log.showProgress = function (name, completed) {
 // temporarily stop emitting, but don't drop
 log.pause = function () {
   this._paused = true
-  if (this.progressEnabled) this.gauge.disable()
+  if (this.progressEnabled) {
+    this.gauge.disable()
+  }
 }
 
 log.resume = function () {
-  if (!this._paused) return
+  if (!this._paused) {
+    return
+  }
+
   this._paused = false
 
   var b = this._buffer
@@ -12240,7 +13046,9 @@ log.resume = function () {
   b.forEach(function (m) {
     this.emitLog(m)
   }, this)
-  if (this.progressEnabled) this.gauge.enable()
+  if (this.progressEnabled) {
+    this.gauge.enable()
+  }
 }
 
 log._buffer = []
@@ -12261,28 +13069,32 @@ log.log = function (lvl, prefix, message) {
     var arg = a[i - 2] = arguments[i]
 
     // resolve stack traces to a plain string.
-    if (typeof arg === 'object' && arg &&
-        (arg instanceof Error) && arg.stack) {
-
+    if (typeof arg === 'object' && arg instanceof Error && arg.stack) {
       Object.defineProperty(arg, 'stack', {
         value: stack = arg.stack + '',
         enumerable: true,
-        writable: true
+        writable: true,
       })
     }
   }
-  if (stack) a.unshift(stack + '\n')
+  if (stack) {
+    a.unshift(stack + '\n')
+  }
   message = util.format.apply(util, a)
 
-  var m = { id: id++,
-            level: lvl,
-            prefix: String(prefix || ''),
-            message: message,
-            messageRaw: a }
+  var m = {
+    id: id++,
+    level: lvl,
+    prefix: String(prefix || ''),
+    message: message,
+    messageRaw: a,
+  }
 
   this.emit('log', m)
   this.emit('log.' + lvl, m)
-  if (m.prefix) this.emit(m.prefix, m)
+  if (m.prefix) {
+    this.emit(m.prefix, m)
+  }
 
   this.record.push(m)
   var mrs = this.maxRecordSize
@@ -12300,11 +13112,22 @@ log.emitLog = function (m) {
     this._buffer.push(m)
     return
   }
-  if (this.progressEnabled) this.gauge.pulse(m.prefix)
+  if (this.progressEnabled) {
+    this.gauge.pulse(m.prefix)
+  }
+
   var l = this.levels[m.level]
-  if (l === undefined) return
-  if (l < this.levels[this.level]) return
-  if (l > 0 && !isFinite(l)) return
+  if (l === undefined) {
+    return
+  }
+
+  if (l < this.levels[this.level]) {
+    return
+  }
+
+  if (l > 0 && !isFinite(l)) {
+    return
+  }
 
   // If 'disp' is null or undefined, use the lvl as a default
   // Allows: '', 0 as valid disp
@@ -12317,7 +13140,10 @@ log.emitLog = function (m) {
     }
     this.write(disp, log.style[m.level])
     var p = m.prefix || ''
-    if (p) this.write(' ')
+    if (p) {
+      this.write(' ')
+    }
+
     this.write(p, this.prefixStyle)
     this.write(' ' + line + '\n')
   }, this)
@@ -12325,36 +13151,64 @@ log.emitLog = function (m) {
 }
 
 log._format = function (msg, style) {
-  if (!stream) return
+  if (!stream) {
+    return
+  }
 
   var output = ''
   if (this.useColor()) {
     style = style || {}
     var settings = []
-    if (style.fg) settings.push(style.fg)
-    if (style.bg) settings.push('bg' + style.bg[0].toUpperCase() + style.bg.slice(1))
-    if (style.bold) settings.push('bold')
-    if (style.underline) settings.push('underline')
-    if (style.inverse) settings.push('inverse')
-    if (settings.length) output += consoleControl.color(settings)
-    if (style.beep) output += consoleControl.beep()
+    if (style.fg) {
+      settings.push(style.fg)
+    }
+
+    if (style.bg) {
+      settings.push('bg' + style.bg[0].toUpperCase() + style.bg.slice(1))
+    }
+
+    if (style.bold) {
+      settings.push('bold')
+    }
+
+    if (style.underline) {
+      settings.push('underline')
+    }
+
+    if (style.inverse) {
+      settings.push('inverse')
+    }
+
+    if (settings.length) {
+      output += consoleControl.color(settings)
+    }
+
+    if (style.beep) {
+      output += consoleControl.beep()
+    }
   }
   output += msg
   if (this.useColor()) {
     output += consoleControl.color('reset')
   }
+
   return output
 }
 
 log.write = function (msg, style) {
-  if (!stream) return
+  if (!stream) {
+    return
+  }
 
   stream.write(this._format(msg, style))
 }
 
 log.addLevel = function (lvl, n, style, disp) {
   // If 'disp' is null or undefined, use the lvl as a default
-  if (disp == null) disp = lvl
+  if (disp == null) {
+    disp = lvl
+  }
+
   this.levels[lvl] = n
   this.style[lvl] = style
   if (!this[lvl]) {
@@ -12364,6 +13218,7 @@ log.addLevel = function (lvl, n, style, disp) {
       for (var i = 0; i < arguments.length; i++) {
         a[i + 1] = arguments[i]
       }
+
       return this.log.apply(this, a)
     }.bind(this)
   }
@@ -12388,18 +13243,6 @@ log.addLevel('silent', Infinity)
 
 // allow 'error' prefix
 log.on('error', function () {})
-
-
-/***/ }),
-
-/***/ 6954:
-/***/ ((module) => {
-
-"use strict";
-
-module.exports = Number.isNaN || function (x) {
-	return x !== x;
-};
 
 
 /***/ }),
@@ -12551,150 +13394,6 @@ function onceStrict (fn) {
 
 /***/ }),
 
-/***/ 2348:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-var os = __nccwpck_require__(2087);
-
-function homedir() {
-	var env = process.env;
-	var home = env.HOME;
-	var user = env.LOGNAME || env.USER || env.LNAME || env.USERNAME;
-
-	if (process.platform === 'win32') {
-		return env.USERPROFILE || env.HOMEDRIVE + env.HOMEPATH || home || null;
-	}
-
-	if (process.platform === 'darwin') {
-		return home || (user ? '/Users/' + user : null);
-	}
-
-	if (process.platform === 'linux') {
-		return home || (process.getuid() === 0 ? '/root' : (user ? '/home/' + user : null));
-	}
-
-	return home || null;
-}
-
-module.exports = typeof os.homedir === 'function' ? os.homedir : homedir;
-
-
-/***/ }),
-
-/***/ 3813:
-/***/ ((module) => {
-
-"use strict";
-
-var isWindows = process.platform === 'win32';
-var trailingSlashRe = isWindows ? /[^:]\\$/ : /.\/$/;
-
-// https://github.com/nodejs/node/blob/3e7a14381497a3b73dda68d05b5130563cdab420/lib/os.js#L25-L43
-module.exports = function () {
-	var path;
-
-	if (isWindows) {
-		path = process.env.TEMP ||
-			process.env.TMP ||
-			(process.env.SystemRoot || process.env.windir) + '\\temp';
-	} else {
-		path = process.env.TMPDIR ||
-			process.env.TMP ||
-			process.env.TEMP ||
-			'/tmp';
-	}
-
-	if (trailingSlashRe.test(path)) {
-		path = path.slice(0, -1);
-	}
-
-	return path;
-};
-
-
-/***/ }),
-
-/***/ 6263:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-var isWindows = process.platform === 'win32'
-var path = __nccwpck_require__(5622)
-var exec = __nccwpck_require__(3129).exec
-var osTmpdir = __nccwpck_require__(3813)
-var osHomedir = __nccwpck_require__(2348)
-
-// looking up envs is a bit costly.
-// Also, sometimes we want to have a fallback
-// Pass in a callback to wait for the fallback on failures
-// After the first lookup, always returns the same thing.
-function memo (key, lookup, fallback) {
-  var fell = false
-  var falling = false
-  exports[key] = function (cb) {
-    var val = lookup()
-    if (!val && !fell && !falling && fallback) {
-      fell = true
-      falling = true
-      exec(fallback, function (er, output, stderr) {
-        falling = false
-        if (er) return // oh well, we tried
-        val = output.trim()
-      })
-    }
-    exports[key] = function (cb) {
-      if (cb) process.nextTick(cb.bind(null, null, val))
-      return val
-    }
-    if (cb && !falling) process.nextTick(cb.bind(null, null, val))
-    return val
-  }
-}
-
-memo('user', function () {
-  return ( isWindows
-         ? process.env.USERDOMAIN + '\\' + process.env.USERNAME
-         : process.env.USER
-         )
-}, 'whoami')
-
-memo('prompt', function () {
-  return isWindows ? process.env.PROMPT : process.env.PS1
-})
-
-memo('hostname', function () {
-  return isWindows ? process.env.COMPUTERNAME : process.env.HOSTNAME
-}, 'hostname')
-
-memo('tmpdir', function () {
-  return osTmpdir()
-})
-
-memo('home', function () {
-  return osHomedir()
-})
-
-memo('path', function () {
-  return (process.env.PATH ||
-          process.env.Path ||
-          process.env.path).split(isWindows ? ';' : ':')
-})
-
-memo('editor', function () {
-  return process.env.EDITOR ||
-         process.env.VISUAL ||
-         (isWindows ? 'notepad.exe' : 'vi')
-})
-
-memo('shell', function () {
-  return isWindows ? process.env.ComSpec || 'cmd'
-         : process.env.SHELL || 'bash'
-})
-
-
-/***/ }),
-
 /***/ 3122:
 /***/ ((module) => {
 
@@ -12719,59 +13418,6 @@ function win32(path) {
 module.exports = process.platform === 'win32' ? win32 : posix;
 module.exports.posix = posix;
 module.exports.win32 = win32;
-
-
-/***/ }),
-
-/***/ 8311:
-/***/ ((module) => {
-
-"use strict";
-
-
-if (typeof process === 'undefined' ||
-    !process.version ||
-    process.version.indexOf('v0.') === 0 ||
-    process.version.indexOf('v1.') === 0 && process.version.indexOf('v1.8.') !== 0) {
-  module.exports = { nextTick: nextTick };
-} else {
-  module.exports = process
-}
-
-function nextTick(fn, arg1, arg2, arg3) {
-  if (typeof fn !== 'function') {
-    throw new TypeError('"callback" argument must be a function');
-  }
-  var len = arguments.length;
-  var args, i;
-  switch (len) {
-  case 0:
-  case 1:
-    return process.nextTick(fn);
-  case 2:
-    return process.nextTick(function afterTickOne() {
-      fn.call(null, arg1);
-    });
-  case 3:
-    return process.nextTick(function afterTickTwo() {
-      fn.call(null, arg1, arg2);
-    });
-  case 4:
-    return process.nextTick(function afterTickThree() {
-      fn.call(null, arg1, arg2, arg3);
-    });
-  default:
-    args = new Array(len - 1);
-    i = 0;
-    while (i < args.length) {
-      args[i++] = arguments[i];
-    }
-    return process.nextTick(function afterTick() {
-      fn.apply(null, args);
-    });
-  }
-}
-
 
 
 /***/ }),
@@ -12810,7 +13456,7 @@ function nextTick(fn, arg1, arg2, arg3) {
 
 /*<replacement>*/
 
-var pna = __nccwpck_require__(8311);
+var pna = __nccwpck_require__(6808);
 /*</replacement>*/
 
 /*<replacement>*/
@@ -12825,7 +13471,7 @@ var objectKeys = Object.keys || function (obj) {
 module.exports = Duplex;
 
 /*<replacement>*/
-var util = Object.create(__nccwpck_require__(9892));
+var util = Object.create(__nccwpck_require__(8826));
 util.inherits = __nccwpck_require__(8995);
 /*</replacement>*/
 
@@ -12950,7 +13596,7 @@ module.exports = PassThrough;
 var Transform = __nccwpck_require__(43);
 
 /*<replacement>*/
-var util = Object.create(__nccwpck_require__(9892));
+var util = Object.create(__nccwpck_require__(8826));
 util.inherits = __nccwpck_require__(8995);
 /*</replacement>*/
 
@@ -12997,13 +13643,13 @@ PassThrough.prototype._transform = function (chunk, encoding, cb) {
 
 /*<replacement>*/
 
-var pna = __nccwpck_require__(8311);
+var pna = __nccwpck_require__(6808);
 /*</replacement>*/
 
 module.exports = Readable;
 
 /*<replacement>*/
-var isArray = __nccwpck_require__(2563);
+var isArray = __nccwpck_require__(8628);
 /*</replacement>*/
 
 /*<replacement>*/
@@ -13038,7 +13684,7 @@ function _isUint8Array(obj) {
 /*</replacement>*/
 
 /*<replacement>*/
-var util = Object.create(__nccwpck_require__(9892));
+var util = Object.create(__nccwpck_require__(8826));
 util.inherits = __nccwpck_require__(8995);
 /*</replacement>*/
 
@@ -13052,7 +13698,7 @@ if (debugUtil && debugUtil.debuglog) {
 }
 /*</replacement>*/
 
-var BufferList = __nccwpck_require__(1741);
+var BufferList = __nccwpck_require__(5197);
 var destroyImpl = __nccwpck_require__(5875);
 var StringDecoder;
 
@@ -14068,7 +14714,7 @@ module.exports = Transform;
 var Duplex = __nccwpck_require__(9228);
 
 /*<replacement>*/
-var util = Object.create(__nccwpck_require__(9892));
+var util = Object.create(__nccwpck_require__(8826));
 util.inherits = __nccwpck_require__(8995);
 /*</replacement>*/
 
@@ -14248,7 +14894,7 @@ function done(stream, er, data) {
 
 /*<replacement>*/
 
-var pna = __nccwpck_require__(8311);
+var pna = __nccwpck_require__(6808);
 /*</replacement>*/
 
 module.exports = Writable;
@@ -14285,7 +14931,7 @@ var Duplex;
 Writable.WritableState = WritableState;
 
 /*<replacement>*/
-var util = Object.create(__nccwpck_require__(9892));
+var util = Object.create(__nccwpck_require__(8826));
 util.inherits = __nccwpck_require__(8995);
 /*</replacement>*/
 
@@ -14909,92 +15555,6 @@ Writable.prototype._destroy = function (err, cb) {
 
 /***/ }),
 
-/***/ 1741:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
-
-var Buffer = __nccwpck_require__(4880).Buffer;
-var util = __nccwpck_require__(1669);
-
-function copyBuffer(src, target, offset) {
-  src.copy(target, offset);
-}
-
-module.exports = function () {
-  function BufferList() {
-    _classCallCheck(this, BufferList);
-
-    this.head = null;
-    this.tail = null;
-    this.length = 0;
-  }
-
-  BufferList.prototype.push = function push(v) {
-    var entry = { data: v, next: null };
-    if (this.length > 0) this.tail.next = entry;else this.head = entry;
-    this.tail = entry;
-    ++this.length;
-  };
-
-  BufferList.prototype.unshift = function unshift(v) {
-    var entry = { data: v, next: this.head };
-    if (this.length === 0) this.tail = entry;
-    this.head = entry;
-    ++this.length;
-  };
-
-  BufferList.prototype.shift = function shift() {
-    if (this.length === 0) return;
-    var ret = this.head.data;
-    if (this.length === 1) this.head = this.tail = null;else this.head = this.head.next;
-    --this.length;
-    return ret;
-  };
-
-  BufferList.prototype.clear = function clear() {
-    this.head = this.tail = null;
-    this.length = 0;
-  };
-
-  BufferList.prototype.join = function join(s) {
-    if (this.length === 0) return '';
-    var p = this.head;
-    var ret = '' + p.data;
-    while (p = p.next) {
-      ret += s + p.data;
-    }return ret;
-  };
-
-  BufferList.prototype.concat = function concat(n) {
-    if (this.length === 0) return Buffer.alloc(0);
-    if (this.length === 1) return this.head.data;
-    var ret = Buffer.allocUnsafe(n >>> 0);
-    var p = this.head;
-    var i = 0;
-    while (p) {
-      copyBuffer(p.data, ret, i);
-      i += p.data.length;
-      p = p.next;
-    }
-    return ret;
-  };
-
-  return BufferList;
-}();
-
-if (util && util.inspect && util.inspect.custom) {
-  module.exports.prototype[util.inspect.custom] = function () {
-    var obj = util.inspect({ length: this.length });
-    return this.constructor.name + ' ' + obj;
-  };
-}
-
-/***/ }),
-
 /***/ 5875:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
@@ -15003,7 +15563,7 @@ if (util && util.inspect && util.inspect.custom) {
 
 /*<replacement>*/
 
-var pna = __nccwpck_require__(8311);
+var pna = __nccwpck_require__(6808);
 /*</replacement>*/
 
 // undocumented cb() API, needed for core, not for public API
@@ -15558,694 +16118,1010 @@ SafeBuffer.allocUnsafeSlow = function (size) {
 
 /***/ }),
 
-/***/ 4834:
-/***/ ((module, exports) => {
+/***/ 7966:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-exports = module.exports = SemVer
-
-var debug
-/* istanbul ignore next */
-if (typeof process === 'object' &&
-    process.env &&
-    process.env.NODE_DEBUG &&
-    /\bsemver\b/i.test(process.env.NODE_DEBUG)) {
-  debug = function () {
-    var args = Array.prototype.slice.call(arguments, 0)
-    args.unshift('SEMVER')
-    console.log.apply(console, args)
+const ANY = Symbol('SemVer ANY')
+// hoisted class for cyclic dependency
+class Comparator {
+  static get ANY () {
+    return ANY
   }
-} else {
-  debug = function () {}
-}
 
-// Note: this is the semver.org version of the spec that it implements
-// Not necessarily the package version of this code.
-exports.SEMVER_SPEC_VERSION = '2.0.0'
+  constructor (comp, options) {
+    options = parseOptions(options)
 
-var MAX_LENGTH = 256
-var MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER ||
-  /* istanbul ignore next */ 9007199254740991
-
-// Max safe segment length for coercion.
-var MAX_SAFE_COMPONENT_LENGTH = 16
-
-// The actual regexps go on exports.re
-var re = exports.re = []
-var src = exports.src = []
-var R = 0
-
-// The following Regular Expressions can be used for tokenizing,
-// validating, and parsing SemVer version strings.
-
-// ## Numeric Identifier
-// A single `0`, or a non-zero digit followed by zero or more digits.
-
-var NUMERICIDENTIFIER = R++
-src[NUMERICIDENTIFIER] = '0|[1-9]\\d*'
-var NUMERICIDENTIFIERLOOSE = R++
-src[NUMERICIDENTIFIERLOOSE] = '[0-9]+'
-
-// ## Non-numeric Identifier
-// Zero or more digits, followed by a letter or hyphen, and then zero or
-// more letters, digits, or hyphens.
-
-var NONNUMERICIDENTIFIER = R++
-src[NONNUMERICIDENTIFIER] = '\\d*[a-zA-Z-][a-zA-Z0-9-]*'
-
-// ## Main Version
-// Three dot-separated numeric identifiers.
-
-var MAINVERSION = R++
-src[MAINVERSION] = '(' + src[NUMERICIDENTIFIER] + ')\\.' +
-                   '(' + src[NUMERICIDENTIFIER] + ')\\.' +
-                   '(' + src[NUMERICIDENTIFIER] + ')'
-
-var MAINVERSIONLOOSE = R++
-src[MAINVERSIONLOOSE] = '(' + src[NUMERICIDENTIFIERLOOSE] + ')\\.' +
-                        '(' + src[NUMERICIDENTIFIERLOOSE] + ')\\.' +
-                        '(' + src[NUMERICIDENTIFIERLOOSE] + ')'
-
-// ## Pre-release Version Identifier
-// A numeric identifier, or a non-numeric identifier.
-
-var PRERELEASEIDENTIFIER = R++
-src[PRERELEASEIDENTIFIER] = '(?:' + src[NUMERICIDENTIFIER] +
-                            '|' + src[NONNUMERICIDENTIFIER] + ')'
-
-var PRERELEASEIDENTIFIERLOOSE = R++
-src[PRERELEASEIDENTIFIERLOOSE] = '(?:' + src[NUMERICIDENTIFIERLOOSE] +
-                                 '|' + src[NONNUMERICIDENTIFIER] + ')'
-
-// ## Pre-release Version
-// Hyphen, followed by one or more dot-separated pre-release version
-// identifiers.
-
-var PRERELEASE = R++
-src[PRERELEASE] = '(?:-(' + src[PRERELEASEIDENTIFIER] +
-                  '(?:\\.' + src[PRERELEASEIDENTIFIER] + ')*))'
-
-var PRERELEASELOOSE = R++
-src[PRERELEASELOOSE] = '(?:-?(' + src[PRERELEASEIDENTIFIERLOOSE] +
-                       '(?:\\.' + src[PRERELEASEIDENTIFIERLOOSE] + ')*))'
-
-// ## Build Metadata Identifier
-// Any combination of digits, letters, or hyphens.
-
-var BUILDIDENTIFIER = R++
-src[BUILDIDENTIFIER] = '[0-9A-Za-z-]+'
-
-// ## Build Metadata
-// Plus sign, followed by one or more period-separated build metadata
-// identifiers.
-
-var BUILD = R++
-src[BUILD] = '(?:\\+(' + src[BUILDIDENTIFIER] +
-             '(?:\\.' + src[BUILDIDENTIFIER] + ')*))'
-
-// ## Full Version String
-// A main version, followed optionally by a pre-release version and
-// build metadata.
-
-// Note that the only major, minor, patch, and pre-release sections of
-// the version string are capturing groups.  The build metadata is not a
-// capturing group, because it should not ever be used in version
-// comparison.
-
-var FULL = R++
-var FULLPLAIN = 'v?' + src[MAINVERSION] +
-                src[PRERELEASE] + '?' +
-                src[BUILD] + '?'
-
-src[FULL] = '^' + FULLPLAIN + '$'
-
-// like full, but allows v1.2.3 and =1.2.3, which people do sometimes.
-// also, 1.0.0alpha1 (prerelease without the hyphen) which is pretty
-// common in the npm registry.
-var LOOSEPLAIN = '[v=\\s]*' + src[MAINVERSIONLOOSE] +
-                 src[PRERELEASELOOSE] + '?' +
-                 src[BUILD] + '?'
-
-var LOOSE = R++
-src[LOOSE] = '^' + LOOSEPLAIN + '$'
-
-var GTLT = R++
-src[GTLT] = '((?:<|>)?=?)'
-
-// Something like "2.*" or "1.2.x".
-// Note that "x.x" is a valid xRange identifer, meaning "any version"
-// Only the first item is strictly required.
-var XRANGEIDENTIFIERLOOSE = R++
-src[XRANGEIDENTIFIERLOOSE] = src[NUMERICIDENTIFIERLOOSE] + '|x|X|\\*'
-var XRANGEIDENTIFIER = R++
-src[XRANGEIDENTIFIER] = src[NUMERICIDENTIFIER] + '|x|X|\\*'
-
-var XRANGEPLAIN = R++
-src[XRANGEPLAIN] = '[v=\\s]*(' + src[XRANGEIDENTIFIER] + ')' +
-                   '(?:\\.(' + src[XRANGEIDENTIFIER] + ')' +
-                   '(?:\\.(' + src[XRANGEIDENTIFIER] + ')' +
-                   '(?:' + src[PRERELEASE] + ')?' +
-                   src[BUILD] + '?' +
-                   ')?)?'
-
-var XRANGEPLAINLOOSE = R++
-src[XRANGEPLAINLOOSE] = '[v=\\s]*(' + src[XRANGEIDENTIFIERLOOSE] + ')' +
-                        '(?:\\.(' + src[XRANGEIDENTIFIERLOOSE] + ')' +
-                        '(?:\\.(' + src[XRANGEIDENTIFIERLOOSE] + ')' +
-                        '(?:' + src[PRERELEASELOOSE] + ')?' +
-                        src[BUILD] + '?' +
-                        ')?)?'
-
-var XRANGE = R++
-src[XRANGE] = '^' + src[GTLT] + '\\s*' + src[XRANGEPLAIN] + '$'
-var XRANGELOOSE = R++
-src[XRANGELOOSE] = '^' + src[GTLT] + '\\s*' + src[XRANGEPLAINLOOSE] + '$'
-
-// Coercion.
-// Extract anything that could conceivably be a part of a valid semver
-var COERCE = R++
-src[COERCE] = '(?:^|[^\\d])' +
-              '(\\d{1,' + MAX_SAFE_COMPONENT_LENGTH + '})' +
-              '(?:\\.(\\d{1,' + MAX_SAFE_COMPONENT_LENGTH + '}))?' +
-              '(?:\\.(\\d{1,' + MAX_SAFE_COMPONENT_LENGTH + '}))?' +
-              '(?:$|[^\\d])'
-
-// Tilde ranges.
-// Meaning is "reasonably at or greater than"
-var LONETILDE = R++
-src[LONETILDE] = '(?:~>?)'
-
-var TILDETRIM = R++
-src[TILDETRIM] = '(\\s*)' + src[LONETILDE] + '\\s+'
-re[TILDETRIM] = new RegExp(src[TILDETRIM], 'g')
-var tildeTrimReplace = '$1~'
-
-var TILDE = R++
-src[TILDE] = '^' + src[LONETILDE] + src[XRANGEPLAIN] + '$'
-var TILDELOOSE = R++
-src[TILDELOOSE] = '^' + src[LONETILDE] + src[XRANGEPLAINLOOSE] + '$'
-
-// Caret ranges.
-// Meaning is "at least and backwards compatible with"
-var LONECARET = R++
-src[LONECARET] = '(?:\\^)'
-
-var CARETTRIM = R++
-src[CARETTRIM] = '(\\s*)' + src[LONECARET] + '\\s+'
-re[CARETTRIM] = new RegExp(src[CARETTRIM], 'g')
-var caretTrimReplace = '$1^'
-
-var CARET = R++
-src[CARET] = '^' + src[LONECARET] + src[XRANGEPLAIN] + '$'
-var CARETLOOSE = R++
-src[CARETLOOSE] = '^' + src[LONECARET] + src[XRANGEPLAINLOOSE] + '$'
-
-// A simple gt/lt/eq thing, or just "" to indicate "any version"
-var COMPARATORLOOSE = R++
-src[COMPARATORLOOSE] = '^' + src[GTLT] + '\\s*(' + LOOSEPLAIN + ')$|^$'
-var COMPARATOR = R++
-src[COMPARATOR] = '^' + src[GTLT] + '\\s*(' + FULLPLAIN + ')$|^$'
-
-// An expression to strip any whitespace between the gtlt and the thing
-// it modifies, so that `> 1.2.3` ==> `>1.2.3`
-var COMPARATORTRIM = R++
-src[COMPARATORTRIM] = '(\\s*)' + src[GTLT] +
-                      '\\s*(' + LOOSEPLAIN + '|' + src[XRANGEPLAIN] + ')'
-
-// this one has to use the /g flag
-re[COMPARATORTRIM] = new RegExp(src[COMPARATORTRIM], 'g')
-var comparatorTrimReplace = '$1$2$3'
-
-// Something like `1.2.3 - 1.2.4`
-// Note that these all use the loose form, because they'll be
-// checked against either the strict or loose comparator form
-// later.
-var HYPHENRANGE = R++
-src[HYPHENRANGE] = '^\\s*(' + src[XRANGEPLAIN] + ')' +
-                   '\\s+-\\s+' +
-                   '(' + src[XRANGEPLAIN] + ')' +
-                   '\\s*$'
-
-var HYPHENRANGELOOSE = R++
-src[HYPHENRANGELOOSE] = '^\\s*(' + src[XRANGEPLAINLOOSE] + ')' +
-                        '\\s+-\\s+' +
-                        '(' + src[XRANGEPLAINLOOSE] + ')' +
-                        '\\s*$'
-
-// Star ranges basically just allow anything at all.
-var STAR = R++
-src[STAR] = '(<|>)?=?\\s*\\*'
-
-// Compile to actual regexp objects.
-// All are flag-free, unless they were created above with a flag.
-for (var i = 0; i < R; i++) {
-  debug(i, src[i])
-  if (!re[i]) {
-    re[i] = new RegExp(src[i])
-  }
-}
-
-exports.parse = parse
-function parse (version, options) {
-  if (!options || typeof options !== 'object') {
-    options = {
-      loose: !!options,
-      includePrerelease: false
+    if (comp instanceof Comparator) {
+      if (comp.loose === !!options.loose) {
+        return comp
+      } else {
+        comp = comp.value
+      }
     }
-  }
 
-  if (version instanceof SemVer) {
-    return version
-  }
+    debug('comparator', comp, options)
+    this.options = options
+    this.loose = !!options.loose
+    this.parse(comp)
 
-  if (typeof version !== 'string') {
-    return null
-  }
-
-  if (version.length > MAX_LENGTH) {
-    return null
-  }
-
-  var r = options.loose ? re[LOOSE] : re[FULL]
-  if (!r.test(version)) {
-    return null
-  }
-
-  try {
-    return new SemVer(version, options)
-  } catch (er) {
-    return null
-  }
-}
-
-exports.valid = valid
-function valid (version, options) {
-  var v = parse(version, options)
-  return v ? v.version : null
-}
-
-exports.clean = clean
-function clean (version, options) {
-  var s = parse(version.trim().replace(/^[=v]+/, ''), options)
-  return s ? s.version : null
-}
-
-exports.SemVer = SemVer
-
-function SemVer (version, options) {
-  if (!options || typeof options !== 'object') {
-    options = {
-      loose: !!options,
-      includePrerelease: false
-    }
-  }
-  if (version instanceof SemVer) {
-    if (version.loose === options.loose) {
-      return version
+    if (this.semver === ANY) {
+      this.value = ''
     } else {
-      version = version.version
+      this.value = this.operator + this.semver.version
     }
-  } else if (typeof version !== 'string') {
-    throw new TypeError('Invalid Version: ' + version)
+
+    debug('comp', this)
   }
 
-  if (version.length > MAX_LENGTH) {
-    throw new TypeError('version is longer than ' + MAX_LENGTH + ' characters')
+  parse (comp) {
+    const r = this.options.loose ? re[t.COMPARATORLOOSE] : re[t.COMPARATOR]
+    const m = comp.match(r)
+
+    if (!m) {
+      throw new TypeError(`Invalid comparator: ${comp}`)
+    }
+
+    this.operator = m[1] !== undefined ? m[1] : ''
+    if (this.operator === '=') {
+      this.operator = ''
+    }
+
+    // if it literally is just '>' or '' then allow anything.
+    if (!m[2]) {
+      this.semver = ANY
+    } else {
+      this.semver = new SemVer(m[2], this.options.loose)
+    }
   }
 
-  if (!(this instanceof SemVer)) {
-    return new SemVer(version, options)
+  toString () {
+    return this.value
   }
 
-  debug('SemVer', version, options)
-  this.options = options
-  this.loose = !!options.loose
+  test (version) {
+    debug('Comparator.test', version, this.options.loose)
 
-  var m = version.trim().match(options.loose ? re[LOOSE] : re[FULL])
+    if (this.semver === ANY || version === ANY) {
+      return true
+    }
 
-  if (!m) {
-    throw new TypeError('Invalid Version: ' + version)
+    if (typeof version === 'string') {
+      try {
+        version = new SemVer(version, this.options)
+      } catch (er) {
+        return false
+      }
+    }
+
+    return cmp(version, this.operator, this.semver, this.options)
   }
 
-  this.raw = version
+  intersects (comp, options) {
+    if (!(comp instanceof Comparator)) {
+      throw new TypeError('a Comparator is required')
+    }
 
-  // these are actually numbers
-  this.major = +m[1]
-  this.minor = +m[2]
-  this.patch = +m[3]
+    if (!options || typeof options !== 'object') {
+      options = {
+        loose: !!options,
+        includePrerelease: false,
+      }
+    }
 
-  if (this.major > MAX_SAFE_INTEGER || this.major < 0) {
-    throw new TypeError('Invalid major version')
+    if (this.operator === '') {
+      if (this.value === '') {
+        return true
+      }
+      return new Range(comp.value, options).test(this.value)
+    } else if (comp.operator === '') {
+      if (comp.value === '') {
+        return true
+      }
+      return new Range(this.value, options).test(comp.semver)
+    }
+
+    const sameDirectionIncreasing =
+      (this.operator === '>=' || this.operator === '>') &&
+      (comp.operator === '>=' || comp.operator === '>')
+    const sameDirectionDecreasing =
+      (this.operator === '<=' || this.operator === '<') &&
+      (comp.operator === '<=' || comp.operator === '<')
+    const sameSemVer = this.semver.version === comp.semver.version
+    const differentDirectionsInclusive =
+      (this.operator === '>=' || this.operator === '<=') &&
+      (comp.operator === '>=' || comp.operator === '<=')
+    const oppositeDirectionsLessThan =
+      cmp(this.semver, '<', comp.semver, options) &&
+      (this.operator === '>=' || this.operator === '>') &&
+        (comp.operator === '<=' || comp.operator === '<')
+    const oppositeDirectionsGreaterThan =
+      cmp(this.semver, '>', comp.semver, options) &&
+      (this.operator === '<=' || this.operator === '<') &&
+        (comp.operator === '>=' || comp.operator === '>')
+
+    return (
+      sameDirectionIncreasing ||
+      sameDirectionDecreasing ||
+      (sameSemVer && differentDirectionsInclusive) ||
+      oppositeDirectionsLessThan ||
+      oppositeDirectionsGreaterThan
+    )
   }
+}
 
-  if (this.minor > MAX_SAFE_INTEGER || this.minor < 0) {
-    throw new TypeError('Invalid minor version')
-  }
+module.exports = Comparator
 
-  if (this.patch > MAX_SAFE_INTEGER || this.patch < 0) {
-    throw new TypeError('Invalid patch version')
-  }
+const parseOptions = __nccwpck_require__(3144)
+const { re, t } = __nccwpck_require__(8207)
+const cmp = __nccwpck_require__(4219)
+const debug = __nccwpck_require__(7690)
+const SemVer = __nccwpck_require__(9068)
+const Range = __nccwpck_require__(2594)
 
-  // numberify any prerelease numeric ids
-  if (!m[4]) {
-    this.prerelease = []
-  } else {
-    this.prerelease = m[4].split('.').map(function (id) {
-      if (/^[0-9]+$/.test(id)) {
-        var num = +id
-        if (num >= 0 && num < MAX_SAFE_INTEGER) {
-          return num
+
+/***/ }),
+
+/***/ 2594:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+// hoisted class for cyclic dependency
+class Range {
+  constructor (range, options) {
+    options = parseOptions(options)
+
+    if (range instanceof Range) {
+      if (
+        range.loose === !!options.loose &&
+        range.includePrerelease === !!options.includePrerelease
+      ) {
+        return range
+      } else {
+        return new Range(range.raw, options)
+      }
+    }
+
+    if (range instanceof Comparator) {
+      // just put it in the set and return
+      this.raw = range.value
+      this.set = [[range]]
+      this.format()
+      return this
+    }
+
+    this.options = options
+    this.loose = !!options.loose
+    this.includePrerelease = !!options.includePrerelease
+
+    // First, split based on boolean or ||
+    this.raw = range
+    this.set = range
+      .split('||')
+      // map the range to a 2d array of comparators
+      .map(r => this.parseRange(r.trim()))
+      // throw out any comparator lists that are empty
+      // this generally means that it was not a valid range, which is allowed
+      // in loose mode, but will still throw if the WHOLE range is invalid.
+      .filter(c => c.length)
+
+    if (!this.set.length) {
+      throw new TypeError(`Invalid SemVer Range: ${range}`)
+    }
+
+    // if we have any that are not the null set, throw out null sets.
+    if (this.set.length > 1) {
+      // keep the first one, in case they're all null sets
+      const first = this.set[0]
+      this.set = this.set.filter(c => !isNullSet(c[0]))
+      if (this.set.length === 0) {
+        this.set = [first]
+      } else if (this.set.length > 1) {
+        // if we have any that are *, then the range is just *
+        for (const c of this.set) {
+          if (c.length === 1 && isAny(c[0])) {
+            this.set = [c]
+            break
+          }
         }
       }
-      return id
+    }
+
+    this.format()
+  }
+
+  format () {
+    this.range = this.set
+      .map((comps) => {
+        return comps.join(' ').trim()
+      })
+      .join('||')
+      .trim()
+    return this.range
+  }
+
+  toString () {
+    return this.range
+  }
+
+  parseRange (range) {
+    range = range.trim()
+
+    // memoize range parsing for performance.
+    // this is a very hot path, and fully deterministic.
+    const memoOpts = Object.keys(this.options).join(',')
+    const memoKey = `parseRange:${memoOpts}:${range}`
+    const cached = cache.get(memoKey)
+    if (cached) {
+      return cached
+    }
+
+    const loose = this.options.loose
+    // `1.2.3 - 1.2.4` => `>=1.2.3 <=1.2.4`
+    const hr = loose ? re[t.HYPHENRANGELOOSE] : re[t.HYPHENRANGE]
+    range = range.replace(hr, hyphenReplace(this.options.includePrerelease))
+    debug('hyphen replace', range)
+    // `> 1.2.3 < 1.2.5` => `>1.2.3 <1.2.5`
+    range = range.replace(re[t.COMPARATORTRIM], comparatorTrimReplace)
+    debug('comparator trim', range)
+
+    // `~ 1.2.3` => `~1.2.3`
+    range = range.replace(re[t.TILDETRIM], tildeTrimReplace)
+
+    // `^ 1.2.3` => `^1.2.3`
+    range = range.replace(re[t.CARETTRIM], caretTrimReplace)
+
+    // normalize spaces
+    range = range.split(/\s+/).join(' ')
+
+    // At this point, the range is completely trimmed and
+    // ready to be split into comparators.
+
+    let rangeList = range
+      .split(' ')
+      .map(comp => parseComparator(comp, this.options))
+      .join(' ')
+      .split(/\s+/)
+      // >=0.0.0 is equivalent to *
+      .map(comp => replaceGTE0(comp, this.options))
+
+    if (loose) {
+      // in loose mode, throw out any that are not valid comparators
+      rangeList = rangeList.filter(comp => {
+        debug('loose invalid filter', comp, this.options)
+        return !!comp.match(re[t.COMPARATORLOOSE])
+      })
+    }
+    debug('range list', rangeList)
+
+    // if any comparators are the null set, then replace with JUST null set
+    // if more than one comparator, remove any * comparators
+    // also, don't include the same comparator more than once
+    const rangeMap = new Map()
+    const comparators = rangeList.map(comp => new Comparator(comp, this.options))
+    for (const comp of comparators) {
+      if (isNullSet(comp)) {
+        return [comp]
+      }
+      rangeMap.set(comp.value, comp)
+    }
+    if (rangeMap.size > 1 && rangeMap.has('')) {
+      rangeMap.delete('')
+    }
+
+    const result = [...rangeMap.values()]
+    cache.set(memoKey, result)
+    return result
+  }
+
+  intersects (range, options) {
+    if (!(range instanceof Range)) {
+      throw new TypeError('a Range is required')
+    }
+
+    return this.set.some((thisComparators) => {
+      return (
+        isSatisfiable(thisComparators, options) &&
+        range.set.some((rangeComparators) => {
+          return (
+            isSatisfiable(rangeComparators, options) &&
+            thisComparators.every((thisComparator) => {
+              return rangeComparators.every((rangeComparator) => {
+                return thisComparator.intersects(rangeComparator, options)
+              })
+            })
+          )
+        })
+      )
     })
   }
 
-  this.build = m[5] ? m[5].split('.') : []
-  this.format()
-}
-
-SemVer.prototype.format = function () {
-  this.version = this.major + '.' + this.minor + '.' + this.patch
-  if (this.prerelease.length) {
-    this.version += '-' + this.prerelease.join('.')
-  }
-  return this.version
-}
-
-SemVer.prototype.toString = function () {
-  return this.version
-}
-
-SemVer.prototype.compare = function (other) {
-  debug('SemVer.compare', this.version, this.options, other)
-  if (!(other instanceof SemVer)) {
-    other = new SemVer(other, this.options)
-  }
-
-  return this.compareMain(other) || this.comparePre(other)
-}
-
-SemVer.prototype.compareMain = function (other) {
-  if (!(other instanceof SemVer)) {
-    other = new SemVer(other, this.options)
-  }
-
-  return compareIdentifiers(this.major, other.major) ||
-         compareIdentifiers(this.minor, other.minor) ||
-         compareIdentifiers(this.patch, other.patch)
-}
-
-SemVer.prototype.comparePre = function (other) {
-  if (!(other instanceof SemVer)) {
-    other = new SemVer(other, this.options)
-  }
-
-  // NOT having a prerelease is > having one
-  if (this.prerelease.length && !other.prerelease.length) {
-    return -1
-  } else if (!this.prerelease.length && other.prerelease.length) {
-    return 1
-  } else if (!this.prerelease.length && !other.prerelease.length) {
-    return 0
-  }
-
-  var i = 0
-  do {
-    var a = this.prerelease[i]
-    var b = other.prerelease[i]
-    debug('prerelease compare', i, a, b)
-    if (a === undefined && b === undefined) {
-      return 0
-    } else if (b === undefined) {
-      return 1
-    } else if (a === undefined) {
-      return -1
-    } else if (a === b) {
-      continue
-    } else {
-      return compareIdentifiers(a, b)
+  // if ANY of the sets match ALL of its comparators, then pass
+  test (version) {
+    if (!version) {
+      return false
     }
-  } while (++i)
+
+    if (typeof version === 'string') {
+      try {
+        version = new SemVer(version, this.options)
+      } catch (er) {
+        return false
+      }
+    }
+
+    for (let i = 0; i < this.set.length; i++) {
+      if (testSet(this.set[i], version, this.options)) {
+        return true
+      }
+    }
+    return false
+  }
+}
+module.exports = Range
+
+const LRU = __nccwpck_require__(637)
+const cache = new LRU({ max: 1000 })
+
+const parseOptions = __nccwpck_require__(3144)
+const Comparator = __nccwpck_require__(7966)
+const debug = __nccwpck_require__(7690)
+const SemVer = __nccwpck_require__(9068)
+const {
+  re,
+  t,
+  comparatorTrimReplace,
+  tildeTrimReplace,
+  caretTrimReplace,
+} = __nccwpck_require__(8207)
+
+const isNullSet = c => c.value === '<0.0.0-0'
+const isAny = c => c.value === ''
+
+// take a set of comparators and determine whether there
+// exists a version which can satisfy it
+const isSatisfiable = (comparators, options) => {
+  let result = true
+  const remainingComparators = comparators.slice()
+  let testComparator = remainingComparators.pop()
+
+  while (result && remainingComparators.length) {
+    result = remainingComparators.every((otherComparator) => {
+      return testComparator.intersects(otherComparator, options)
+    })
+
+    testComparator = remainingComparators.pop()
+  }
+
+  return result
 }
 
-// preminor will bump the version up to the next minor release, and immediately
-// down to pre-release. premajor and prepatch work the same way.
-SemVer.prototype.inc = function (release, identifier) {
-  switch (release) {
-    case 'premajor':
-      this.prerelease.length = 0
-      this.patch = 0
-      this.minor = 0
-      this.major++
-      this.inc('pre', identifier)
-      break
-    case 'preminor':
-      this.prerelease.length = 0
-      this.patch = 0
-      this.minor++
-      this.inc('pre', identifier)
-      break
-    case 'prepatch':
-      // If this is already a prerelease, it will bump to the next version
-      // drop any prereleases that might already exist, since they are not
-      // relevant at this point.
-      this.prerelease.length = 0
-      this.inc('patch', identifier)
-      this.inc('pre', identifier)
-      break
-    // If the input is a non-prerelease version, this acts the same as
-    // prepatch.
-    case 'prerelease':
-      if (this.prerelease.length === 0) {
-        this.inc('patch', identifier)
-      }
-      this.inc('pre', identifier)
-      break
+// comprised of xranges, tildes, stars, and gtlt's at this point.
+// already replaced the hyphen ranges
+// turn into a set of JUST comparators.
+const parseComparator = (comp, options) => {
+  debug('comp', comp, options)
+  comp = replaceCarets(comp, options)
+  debug('caret', comp)
+  comp = replaceTildes(comp, options)
+  debug('tildes', comp)
+  comp = replaceXRanges(comp, options)
+  debug('xrange', comp)
+  comp = replaceStars(comp, options)
+  debug('stars', comp)
+  return comp
+}
 
-    case 'major':
-      // If this is a pre-major version, bump up to the same major version.
-      // Otherwise increment major.
-      // 1.0.0-5 bumps to 1.0.0
-      // 1.1.0 bumps to 2.0.0
-      if (this.minor !== 0 ||
-          this.patch !== 0 ||
-          this.prerelease.length === 0) {
-        this.major++
-      }
-      this.minor = 0
-      this.patch = 0
-      this.prerelease = []
-      break
-    case 'minor':
-      // If this is a pre-minor version, bump up to the same minor version.
-      // Otherwise increment minor.
-      // 1.2.0-5 bumps to 1.2.0
-      // 1.2.1 bumps to 1.3.0
-      if (this.patch !== 0 || this.prerelease.length === 0) {
-        this.minor++
-      }
-      this.patch = 0
-      this.prerelease = []
-      break
-    case 'patch':
-      // If this is not a pre-release version, it will increment the patch.
-      // If it is a pre-release it will bump up to the same patch version.
-      // 1.2.0-5 patches to 1.2.0
-      // 1.2.0 patches to 1.2.1
-      if (this.prerelease.length === 0) {
-        this.patch++
-      }
-      this.prerelease = []
-      break
-    // This probably shouldn't be used publicly.
-    // 1.0.0 "pre" would become 1.0.0-0 which is the wrong direction.
-    case 'pre':
-      if (this.prerelease.length === 0) {
-        this.prerelease = [0]
+const isX = id => !id || id.toLowerCase() === 'x' || id === '*'
+
+// ~, ~> --> * (any, kinda silly)
+// ~2, ~2.x, ~2.x.x, ~>2, ~>2.x ~>2.x.x --> >=2.0.0 <3.0.0-0
+// ~2.0, ~2.0.x, ~>2.0, ~>2.0.x --> >=2.0.0 <2.1.0-0
+// ~1.2, ~1.2.x, ~>1.2, ~>1.2.x --> >=1.2.0 <1.3.0-0
+// ~1.2.3, ~>1.2.3 --> >=1.2.3 <1.3.0-0
+// ~1.2.0, ~>1.2.0 --> >=1.2.0 <1.3.0-0
+const replaceTildes = (comp, options) =>
+  comp.trim().split(/\s+/).map((c) => {
+    return replaceTilde(c, options)
+  }).join(' ')
+
+const replaceTilde = (comp, options) => {
+  const r = options.loose ? re[t.TILDELOOSE] : re[t.TILDE]
+  return comp.replace(r, (_, M, m, p, pr) => {
+    debug('tilde', comp, _, M, m, p, pr)
+    let ret
+
+    if (isX(M)) {
+      ret = ''
+    } else if (isX(m)) {
+      ret = `>=${M}.0.0 <${+M + 1}.0.0-0`
+    } else if (isX(p)) {
+      // ~1.2 == >=1.2.0 <1.3.0-0
+      ret = `>=${M}.${m}.0 <${M}.${+m + 1}.0-0`
+    } else if (pr) {
+      debug('replaceTilde pr', pr)
+      ret = `>=${M}.${m}.${p}-${pr
+      } <${M}.${+m + 1}.0-0`
+    } else {
+      // ~1.2.3 == >=1.2.3 <1.3.0-0
+      ret = `>=${M}.${m}.${p
+      } <${M}.${+m + 1}.0-0`
+    }
+
+    debug('tilde return', ret)
+    return ret
+  })
+}
+
+// ^ --> * (any, kinda silly)
+// ^2, ^2.x, ^2.x.x --> >=2.0.0 <3.0.0-0
+// ^2.0, ^2.0.x --> >=2.0.0 <3.0.0-0
+// ^1.2, ^1.2.x --> >=1.2.0 <2.0.0-0
+// ^1.2.3 --> >=1.2.3 <2.0.0-0
+// ^1.2.0 --> >=1.2.0 <2.0.0-0
+const replaceCarets = (comp, options) =>
+  comp.trim().split(/\s+/).map((c) => {
+    return replaceCaret(c, options)
+  }).join(' ')
+
+const replaceCaret = (comp, options) => {
+  debug('caret', comp, options)
+  const r = options.loose ? re[t.CARETLOOSE] : re[t.CARET]
+  const z = options.includePrerelease ? '-0' : ''
+  return comp.replace(r, (_, M, m, p, pr) => {
+    debug('caret', comp, _, M, m, p, pr)
+    let ret
+
+    if (isX(M)) {
+      ret = ''
+    } else if (isX(m)) {
+      ret = `>=${M}.0.0${z} <${+M + 1}.0.0-0`
+    } else if (isX(p)) {
+      if (M === '0') {
+        ret = `>=${M}.${m}.0${z} <${M}.${+m + 1}.0-0`
       } else {
-        var i = this.prerelease.length
-        while (--i >= 0) {
-          if (typeof this.prerelease[i] === 'number') {
-            this.prerelease[i]++
-            i = -2
+        ret = `>=${M}.${m}.0${z} <${+M + 1}.0.0-0`
+      }
+    } else if (pr) {
+      debug('replaceCaret pr', pr)
+      if (M === '0') {
+        if (m === '0') {
+          ret = `>=${M}.${m}.${p}-${pr
+          } <${M}.${m}.${+p + 1}-0`
+        } else {
+          ret = `>=${M}.${m}.${p}-${pr
+          } <${M}.${+m + 1}.0-0`
+        }
+      } else {
+        ret = `>=${M}.${m}.${p}-${pr
+        } <${+M + 1}.0.0-0`
+      }
+    } else {
+      debug('no pr')
+      if (M === '0') {
+        if (m === '0') {
+          ret = `>=${M}.${m}.${p
+          }${z} <${M}.${m}.${+p + 1}-0`
+        } else {
+          ret = `>=${M}.${m}.${p
+          }${z} <${M}.${+m + 1}.0-0`
+        }
+      } else {
+        ret = `>=${M}.${m}.${p
+        } <${+M + 1}.0.0-0`
+      }
+    }
+
+    debug('caret return', ret)
+    return ret
+  })
+}
+
+const replaceXRanges = (comp, options) => {
+  debug('replaceXRanges', comp, options)
+  return comp.split(/\s+/).map((c) => {
+    return replaceXRange(c, options)
+  }).join(' ')
+}
+
+const replaceXRange = (comp, options) => {
+  comp = comp.trim()
+  const r = options.loose ? re[t.XRANGELOOSE] : re[t.XRANGE]
+  return comp.replace(r, (ret, gtlt, M, m, p, pr) => {
+    debug('xRange', comp, ret, gtlt, M, m, p, pr)
+    const xM = isX(M)
+    const xm = xM || isX(m)
+    const xp = xm || isX(p)
+    const anyX = xp
+
+    if (gtlt === '=' && anyX) {
+      gtlt = ''
+    }
+
+    // if we're including prereleases in the match, then we need
+    // to fix this to -0, the lowest possible prerelease value
+    pr = options.includePrerelease ? '-0' : ''
+
+    if (xM) {
+      if (gtlt === '>' || gtlt === '<') {
+        // nothing is allowed
+        ret = '<0.0.0-0'
+      } else {
+        // nothing is forbidden
+        ret = '*'
+      }
+    } else if (gtlt && anyX) {
+      // we know patch is an x, because we have any x at all.
+      // replace X with 0
+      if (xm) {
+        m = 0
+      }
+      p = 0
+
+      if (gtlt === '>') {
+        // >1 => >=2.0.0
+        // >1.2 => >=1.3.0
+        gtlt = '>='
+        if (xm) {
+          M = +M + 1
+          m = 0
+          p = 0
+        } else {
+          m = +m + 1
+          p = 0
+        }
+      } else if (gtlt === '<=') {
+        // <=0.7.x is actually <0.8.0, since any 0.7.x should
+        // pass.  Similarly, <=7.x is actually <8.0.0, etc.
+        gtlt = '<'
+        if (xm) {
+          M = +M + 1
+        } else {
+          m = +m + 1
+        }
+      }
+
+      if (gtlt === '<') {
+        pr = '-0'
+      }
+
+      ret = `${gtlt + M}.${m}.${p}${pr}`
+    } else if (xm) {
+      ret = `>=${M}.0.0${pr} <${+M + 1}.0.0-0`
+    } else if (xp) {
+      ret = `>=${M}.${m}.0${pr
+      } <${M}.${+m + 1}.0-0`
+    }
+
+    debug('xRange return', ret)
+
+    return ret
+  })
+}
+
+// Because * is AND-ed with everything else in the comparator,
+// and '' means "any version", just remove the *s entirely.
+const replaceStars = (comp, options) => {
+  debug('replaceStars', comp, options)
+  // Looseness is ignored here.  star is always as loose as it gets!
+  return comp.trim().replace(re[t.STAR], '')
+}
+
+const replaceGTE0 = (comp, options) => {
+  debug('replaceGTE0', comp, options)
+  return comp.trim()
+    .replace(re[options.includePrerelease ? t.GTE0PRE : t.GTE0], '')
+}
+
+// This function is passed to string.replace(re[t.HYPHENRANGE])
+// M, m, patch, prerelease, build
+// 1.2 - 3.4.5 => >=1.2.0 <=3.4.5
+// 1.2.3 - 3.4 => >=1.2.0 <3.5.0-0 Any 3.4.x will do
+// 1.2 - 3.4 => >=1.2.0 <3.5.0-0
+const hyphenReplace = incPr => ($0,
+  from, fM, fm, fp, fpr, fb,
+  to, tM, tm, tp, tpr, tb) => {
+  if (isX(fM)) {
+    from = ''
+  } else if (isX(fm)) {
+    from = `>=${fM}.0.0${incPr ? '-0' : ''}`
+  } else if (isX(fp)) {
+    from = `>=${fM}.${fm}.0${incPr ? '-0' : ''}`
+  } else if (fpr) {
+    from = `>=${from}`
+  } else {
+    from = `>=${from}${incPr ? '-0' : ''}`
+  }
+
+  if (isX(tM)) {
+    to = ''
+  } else if (isX(tm)) {
+    to = `<${+tM + 1}.0.0-0`
+  } else if (isX(tp)) {
+    to = `<${tM}.${+tm + 1}.0-0`
+  } else if (tpr) {
+    to = `<=${tM}.${tm}.${tp}-${tpr}`
+  } else if (incPr) {
+    to = `<${tM}.${tm}.${+tp + 1}-0`
+  } else {
+    to = `<=${to}`
+  }
+
+  return (`${from} ${to}`).trim()
+}
+
+const testSet = (set, version, options) => {
+  for (let i = 0; i < set.length; i++) {
+    if (!set[i].test(version)) {
+      return false
+    }
+  }
+
+  if (version.prerelease.length && !options.includePrerelease) {
+    // Find the set of versions that are allowed to have prereleases
+    // For example, ^1.2.3-pr.1 desugars to >=1.2.3-pr.1 <2.0.0
+    // That should allow `1.2.3-pr.2` to pass.
+    // However, `1.2.4-alpha.notready` should NOT be allowed,
+    // even though it's within the range set by the comparators.
+    for (let i = 0; i < set.length; i++) {
+      debug(set[i].semver)
+      if (set[i].semver === Comparator.ANY) {
+        continue
+      }
+
+      if (set[i].semver.prerelease.length > 0) {
+        const allowed = set[i].semver
+        if (allowed.major === version.major &&
+            allowed.minor === version.minor &&
+            allowed.patch === version.patch) {
+          return true
+        }
+      }
+    }
+
+    // Version has a -pre, but it's not one of the ones we like.
+    return false
+  }
+
+  return true
+}
+
+
+/***/ }),
+
+/***/ 9068:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const debug = __nccwpck_require__(7690)
+const { MAX_LENGTH, MAX_SAFE_INTEGER } = __nccwpck_require__(7532)
+const { re, t } = __nccwpck_require__(8207)
+
+const parseOptions = __nccwpck_require__(3144)
+const { compareIdentifiers } = __nccwpck_require__(730)
+class SemVer {
+  constructor (version, options) {
+    options = parseOptions(options)
+
+    if (version instanceof SemVer) {
+      if (version.loose === !!options.loose &&
+          version.includePrerelease === !!options.includePrerelease) {
+        return version
+      } else {
+        version = version.version
+      }
+    } else if (typeof version !== 'string') {
+      throw new TypeError(`Invalid Version: ${version}`)
+    }
+
+    if (version.length > MAX_LENGTH) {
+      throw new TypeError(
+        `version is longer than ${MAX_LENGTH} characters`
+      )
+    }
+
+    debug('SemVer', version, options)
+    this.options = options
+    this.loose = !!options.loose
+    // this isn't actually relevant for versions, but keep it so that we
+    // don't run into trouble passing this.options around.
+    this.includePrerelease = !!options.includePrerelease
+
+    const m = version.trim().match(options.loose ? re[t.LOOSE] : re[t.FULL])
+
+    if (!m) {
+      throw new TypeError(`Invalid Version: ${version}`)
+    }
+
+    this.raw = version
+
+    // these are actually numbers
+    this.major = +m[1]
+    this.minor = +m[2]
+    this.patch = +m[3]
+
+    if (this.major > MAX_SAFE_INTEGER || this.major < 0) {
+      throw new TypeError('Invalid major version')
+    }
+
+    if (this.minor > MAX_SAFE_INTEGER || this.minor < 0) {
+      throw new TypeError('Invalid minor version')
+    }
+
+    if (this.patch > MAX_SAFE_INTEGER || this.patch < 0) {
+      throw new TypeError('Invalid patch version')
+    }
+
+    // numberify any prerelease numeric ids
+    if (!m[4]) {
+      this.prerelease = []
+    } else {
+      this.prerelease = m[4].split('.').map((id) => {
+        if (/^[0-9]+$/.test(id)) {
+          const num = +id
+          if (num >= 0 && num < MAX_SAFE_INTEGER) {
+            return num
           }
         }
-        if (i === -1) {
-          // didn't increment anything
-          this.prerelease.push(0)
-        }
+        return id
+      })
+    }
+
+    this.build = m[5] ? m[5].split('.') : []
+    this.format()
+  }
+
+  format () {
+    this.version = `${this.major}.${this.minor}.${this.patch}`
+    if (this.prerelease.length) {
+      this.version += `-${this.prerelease.join('.')}`
+    }
+    return this.version
+  }
+
+  toString () {
+    return this.version
+  }
+
+  compare (other) {
+    debug('SemVer.compare', this.version, this.options, other)
+    if (!(other instanceof SemVer)) {
+      if (typeof other === 'string' && other === this.version) {
+        return 0
       }
-      if (identifier) {
-        // 1.2.0-beta.1 bumps to 1.2.0-beta.2,
-        // 1.2.0-beta.fooblz or 1.2.0-beta bumps to 1.2.0-beta.0
-        if (this.prerelease[0] === identifier) {
-          if (isNaN(this.prerelease[1])) {
+      other = new SemVer(other, this.options)
+    }
+
+    if (other.version === this.version) {
+      return 0
+    }
+
+    return this.compareMain(other) || this.comparePre(other)
+  }
+
+  compareMain (other) {
+    if (!(other instanceof SemVer)) {
+      other = new SemVer(other, this.options)
+    }
+
+    return (
+      compareIdentifiers(this.major, other.major) ||
+      compareIdentifiers(this.minor, other.minor) ||
+      compareIdentifiers(this.patch, other.patch)
+    )
+  }
+
+  comparePre (other) {
+    if (!(other instanceof SemVer)) {
+      other = new SemVer(other, this.options)
+    }
+
+    // NOT having a prerelease is > having one
+    if (this.prerelease.length && !other.prerelease.length) {
+      return -1
+    } else if (!this.prerelease.length && other.prerelease.length) {
+      return 1
+    } else if (!this.prerelease.length && !other.prerelease.length) {
+      return 0
+    }
+
+    let i = 0
+    do {
+      const a = this.prerelease[i]
+      const b = other.prerelease[i]
+      debug('prerelease compare', i, a, b)
+      if (a === undefined && b === undefined) {
+        return 0
+      } else if (b === undefined) {
+        return 1
+      } else if (a === undefined) {
+        return -1
+      } else if (a === b) {
+        continue
+      } else {
+        return compareIdentifiers(a, b)
+      }
+    } while (++i)
+  }
+
+  compareBuild (other) {
+    if (!(other instanceof SemVer)) {
+      other = new SemVer(other, this.options)
+    }
+
+    let i = 0
+    do {
+      const a = this.build[i]
+      const b = other.build[i]
+      debug('prerelease compare', i, a, b)
+      if (a === undefined && b === undefined) {
+        return 0
+      } else if (b === undefined) {
+        return 1
+      } else if (a === undefined) {
+        return -1
+      } else if (a === b) {
+        continue
+      } else {
+        return compareIdentifiers(a, b)
+      }
+    } while (++i)
+  }
+
+  // preminor will bump the version up to the next minor release, and immediately
+  // down to pre-release. premajor and prepatch work the same way.
+  inc (release, identifier) {
+    switch (release) {
+      case 'premajor':
+        this.prerelease.length = 0
+        this.patch = 0
+        this.minor = 0
+        this.major++
+        this.inc('pre', identifier)
+        break
+      case 'preminor':
+        this.prerelease.length = 0
+        this.patch = 0
+        this.minor++
+        this.inc('pre', identifier)
+        break
+      case 'prepatch':
+        // If this is already a prerelease, it will bump to the next version
+        // drop any prereleases that might already exist, since they are not
+        // relevant at this point.
+        this.prerelease.length = 0
+        this.inc('patch', identifier)
+        this.inc('pre', identifier)
+        break
+      // If the input is a non-prerelease version, this acts the same as
+      // prepatch.
+      case 'prerelease':
+        if (this.prerelease.length === 0) {
+          this.inc('patch', identifier)
+        }
+        this.inc('pre', identifier)
+        break
+
+      case 'major':
+        // If this is a pre-major version, bump up to the same major version.
+        // Otherwise increment major.
+        // 1.0.0-5 bumps to 1.0.0
+        // 1.1.0 bumps to 2.0.0
+        if (
+          this.minor !== 0 ||
+          this.patch !== 0 ||
+          this.prerelease.length === 0
+        ) {
+          this.major++
+        }
+        this.minor = 0
+        this.patch = 0
+        this.prerelease = []
+        break
+      case 'minor':
+        // If this is a pre-minor version, bump up to the same minor version.
+        // Otherwise increment minor.
+        // 1.2.0-5 bumps to 1.2.0
+        // 1.2.1 bumps to 1.3.0
+        if (this.patch !== 0 || this.prerelease.length === 0) {
+          this.minor++
+        }
+        this.patch = 0
+        this.prerelease = []
+        break
+      case 'patch':
+        // If this is not a pre-release version, it will increment the patch.
+        // If it is a pre-release it will bump up to the same patch version.
+        // 1.2.0-5 patches to 1.2.0
+        // 1.2.0 patches to 1.2.1
+        if (this.prerelease.length === 0) {
+          this.patch++
+        }
+        this.prerelease = []
+        break
+      // This probably shouldn't be used publicly.
+      // 1.0.0 'pre' would become 1.0.0-0 which is the wrong direction.
+      case 'pre':
+        if (this.prerelease.length === 0) {
+          this.prerelease = [0]
+        } else {
+          let i = this.prerelease.length
+          while (--i >= 0) {
+            if (typeof this.prerelease[i] === 'number') {
+              this.prerelease[i]++
+              i = -2
+            }
+          }
+          if (i === -1) {
+            // didn't increment anything
+            this.prerelease.push(0)
+          }
+        }
+        if (identifier) {
+          // 1.2.0-beta.1 bumps to 1.2.0-beta.2,
+          // 1.2.0-beta.fooblz or 1.2.0-beta bumps to 1.2.0-beta.0
+          if (compareIdentifiers(this.prerelease[0], identifier) === 0) {
+            if (isNaN(this.prerelease[1])) {
+              this.prerelease = [identifier, 0]
+            }
+          } else {
             this.prerelease = [identifier, 0]
           }
-        } else {
-          this.prerelease = [identifier, 0]
         }
-      }
-      break
+        break
 
-    default:
-      throw new Error('invalid increment argument: ' + release)
-  }
-  this.format()
-  this.raw = this.version
-  return this
-}
-
-exports.inc = inc
-function inc (version, release, loose, identifier) {
-  if (typeof (loose) === 'string') {
-    identifier = loose
-    loose = undefined
-  }
-
-  try {
-    return new SemVer(version, loose).inc(release, identifier).version
-  } catch (er) {
-    return null
-  }
-}
-
-exports.diff = diff
-function diff (version1, version2) {
-  if (eq(version1, version2)) {
-    return null
-  } else {
-    var v1 = parse(version1)
-    var v2 = parse(version2)
-    var prefix = ''
-    if (v1.prerelease.length || v2.prerelease.length) {
-      prefix = 'pre'
-      var defaultResult = 'prerelease'
+      default:
+        throw new Error(`invalid increment argument: ${release}`)
     }
-    for (var key in v1) {
-      if (key === 'major' || key === 'minor' || key === 'patch') {
-        if (v1[key] !== v2[key]) {
-          return prefix + key
-        }
-      }
-    }
-    return defaultResult // may be undefined
+    this.format()
+    this.raw = this.version
+    return this
   }
 }
 
-exports.compareIdentifiers = compareIdentifiers
+module.exports = SemVer
 
-var numeric = /^[0-9]+$/
-function compareIdentifiers (a, b) {
-  var anum = numeric.test(a)
-  var bnum = numeric.test(b)
 
-  if (anum && bnum) {
-    a = +a
-    b = +b
-  }
+/***/ }),
 
-  return a === b ? 0
-    : (anum && !bnum) ? -1
-    : (bnum && !anum) ? 1
-    : a < b ? -1
-    : 1
+/***/ 3711:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const parse = __nccwpck_require__(7218)
+const clean = (version, options) => {
+  const s = parse(version.trim().replace(/^[=v]+/, ''), options)
+  return s ? s.version : null
 }
+module.exports = clean
 
-exports.rcompareIdentifiers = rcompareIdentifiers
-function rcompareIdentifiers (a, b) {
-  return compareIdentifiers(b, a)
-}
 
-exports.major = major
-function major (a, loose) {
-  return new SemVer(a, loose).major
-}
+/***/ }),
 
-exports.minor = minor
-function minor (a, loose) {
-  return new SemVer(a, loose).minor
-}
+/***/ 4219:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-exports.patch = patch
-function patch (a, loose) {
-  return new SemVer(a, loose).patch
-}
+const eq = __nccwpck_require__(4707)
+const neq = __nccwpck_require__(5821)
+const gt = __nccwpck_require__(5930)
+const gte = __nccwpck_require__(6545)
+const lt = __nccwpck_require__(1598)
+const lte = __nccwpck_require__(8468)
 
-exports.compare = compare
-function compare (a, b, loose) {
-  return new SemVer(a, loose).compare(new SemVer(b, loose))
-}
-
-exports.compareLoose = compareLoose
-function compareLoose (a, b) {
-  return compare(a, b, true)
-}
-
-exports.rcompare = rcompare
-function rcompare (a, b, loose) {
-  return compare(b, a, loose)
-}
-
-exports.sort = sort
-function sort (list, loose) {
-  return list.sort(function (a, b) {
-    return exports.compare(a, b, loose)
-  })
-}
-
-exports.rsort = rsort
-function rsort (list, loose) {
-  return list.sort(function (a, b) {
-    return exports.rcompare(a, b, loose)
-  })
-}
-
-exports.gt = gt
-function gt (a, b, loose) {
-  return compare(a, b, loose) > 0
-}
-
-exports.lt = lt
-function lt (a, b, loose) {
-  return compare(a, b, loose) < 0
-}
-
-exports.eq = eq
-function eq (a, b, loose) {
-  return compare(a, b, loose) === 0
-}
-
-exports.neq = neq
-function neq (a, b, loose) {
-  return compare(a, b, loose) !== 0
-}
-
-exports.gte = gte
-function gte (a, b, loose) {
-  return compare(a, b, loose) >= 0
-}
-
-exports.lte = lte
-function lte (a, b, loose) {
-  return compare(a, b, loose) <= 0
-}
-
-exports.cmp = cmp
-function cmp (a, op, b, loose) {
+const cmp = (a, op, b, loose) => {
   switch (op) {
     case '===':
-      if (typeof a === 'object')
+      if (typeof a === 'object') {
         a = a.version
-      if (typeof b === 'object')
+      }
+      if (typeof b === 'object') {
         b = b.version
+      }
       return a === b
 
     case '!==':
-      if (typeof a === 'object')
+      if (typeof a === 'object') {
         a = a.version
-      if (typeof b === 'object')
+      }
+      if (typeof b === 'object') {
         b = b.version
+      }
       return a !== b
 
     case '':
@@ -16269,549 +17145,332 @@ function cmp (a, op, b, loose) {
       return lte(a, b, loose)
 
     default:
-      throw new TypeError('Invalid operator: ' + op)
+      throw new TypeError(`Invalid operator: ${op}`)
   }
 }
+module.exports = cmp
 
-exports.Comparator = Comparator
-function Comparator (comp, options) {
-  if (!options || typeof options !== 'object') {
-    options = {
-      loose: !!options,
-      includePrerelease: false
-    }
+
+/***/ }),
+
+/***/ 9838:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const SemVer = __nccwpck_require__(9068)
+const parse = __nccwpck_require__(7218)
+const { re, t } = __nccwpck_require__(8207)
+
+const coerce = (version, options) => {
+  if (version instanceof SemVer) {
+    return version
   }
 
-  if (comp instanceof Comparator) {
-    if (comp.loose === !!options.loose) {
-      return comp
-    } else {
-      comp = comp.value
-    }
+  if (typeof version === 'number') {
+    version = String(version)
   }
 
-  if (!(this instanceof Comparator)) {
-    return new Comparator(comp, options)
+  if (typeof version !== 'string') {
+    return null
   }
 
-  debug('comparator', comp, options)
-  this.options = options
-  this.loose = !!options.loose
-  this.parse(comp)
+  options = options || {}
 
-  if (this.semver === ANY) {
-    this.value = ''
+  let match = null
+  if (!options.rtl) {
+    match = version.match(re[t.COERCE])
   } else {
-    this.value = this.operator + this.semver.version
+    // Find the right-most coercible string that does not share
+    // a terminus with a more left-ward coercible string.
+    // Eg, '1.2.3.4' wants to coerce '2.3.4', not '3.4' or '4'
+    //
+    // Walk through the string checking with a /g regexp
+    // Manually set the index so as to pick up overlapping matches.
+    // Stop when we get a match that ends at the string end, since no
+    // coercible string can be more right-ward without the same terminus.
+    let next
+    while ((next = re[t.COERCERTL].exec(version)) &&
+        (!match || match.index + match[0].length !== version.length)
+    ) {
+      if (!match ||
+            next.index + next[0].length !== match.index + match[0].length) {
+        match = next
+      }
+      re[t.COERCERTL].lastIndex = next.index + next[1].length + next[2].length
+    }
+    // leave it in a clean state
+    re[t.COERCERTL].lastIndex = -1
   }
 
-  debug('comp', this)
+  if (match === null) {
+    return null
+  }
+
+  return parse(`${match[2]}.${match[3] || '0'}.${match[4] || '0'}`, options)
 }
+module.exports = coerce
 
-var ANY = {}
-Comparator.prototype.parse = function (comp) {
-  var r = this.options.loose ? re[COMPARATORLOOSE] : re[COMPARATOR]
-  var m = comp.match(r)
 
-  if (!m) {
-    throw new TypeError('Invalid comparator: ' + comp)
-  }
+/***/ }),
 
-  this.operator = m[1]
-  if (this.operator === '=') {
-    this.operator = ''
-  }
+/***/ 471:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-  // if it literally is just '>' or '' then allow anything.
-  if (!m[2]) {
-    this.semver = ANY
+const SemVer = __nccwpck_require__(9068)
+const compareBuild = (a, b, loose) => {
+  const versionA = new SemVer(a, loose)
+  const versionB = new SemVer(b, loose)
+  return versionA.compare(versionB) || versionA.compareBuild(versionB)
+}
+module.exports = compareBuild
+
+
+/***/ }),
+
+/***/ 4706:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const compare = __nccwpck_require__(2485)
+const compareLoose = (a, b) => compare(a, b, true)
+module.exports = compareLoose
+
+
+/***/ }),
+
+/***/ 2485:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const SemVer = __nccwpck_require__(9068)
+const compare = (a, b, loose) =>
+  new SemVer(a, loose).compare(new SemVer(b, loose))
+
+module.exports = compare
+
+
+/***/ }),
+
+/***/ 7211:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const parse = __nccwpck_require__(7218)
+const eq = __nccwpck_require__(4707)
+
+const diff = (version1, version2) => {
+  if (eq(version1, version2)) {
+    return null
   } else {
-    this.semver = new SemVer(m[2], this.options.loose)
-  }
-}
-
-Comparator.prototype.toString = function () {
-  return this.value
-}
-
-Comparator.prototype.test = function (version) {
-  debug('Comparator.test', version, this.options.loose)
-
-  if (this.semver === ANY) {
-    return true
-  }
-
-  if (typeof version === 'string') {
-    version = new SemVer(version, this.options)
-  }
-
-  return cmp(version, this.operator, this.semver, this.options)
-}
-
-Comparator.prototype.intersects = function (comp, options) {
-  if (!(comp instanceof Comparator)) {
-    throw new TypeError('a Comparator is required')
-  }
-
-  if (!options || typeof options !== 'object') {
-    options = {
-      loose: !!options,
-      includePrerelease: false
-    }
-  }
-
-  var rangeTmp
-
-  if (this.operator === '') {
-    rangeTmp = new Range(comp.value, options)
-    return satisfies(this.value, rangeTmp, options)
-  } else if (comp.operator === '') {
-    rangeTmp = new Range(this.value, options)
-    return satisfies(comp.semver, rangeTmp, options)
-  }
-
-  var sameDirectionIncreasing =
-    (this.operator === '>=' || this.operator === '>') &&
-    (comp.operator === '>=' || comp.operator === '>')
-  var sameDirectionDecreasing =
-    (this.operator === '<=' || this.operator === '<') &&
-    (comp.operator === '<=' || comp.operator === '<')
-  var sameSemVer = this.semver.version === comp.semver.version
-  var differentDirectionsInclusive =
-    (this.operator === '>=' || this.operator === '<=') &&
-    (comp.operator === '>=' || comp.operator === '<=')
-  var oppositeDirectionsLessThan =
-    cmp(this.semver, '<', comp.semver, options) &&
-    ((this.operator === '>=' || this.operator === '>') &&
-    (comp.operator === '<=' || comp.operator === '<'))
-  var oppositeDirectionsGreaterThan =
-    cmp(this.semver, '>', comp.semver, options) &&
-    ((this.operator === '<=' || this.operator === '<') &&
-    (comp.operator === '>=' || comp.operator === '>'))
-
-  return sameDirectionIncreasing || sameDirectionDecreasing ||
-    (sameSemVer && differentDirectionsInclusive) ||
-    oppositeDirectionsLessThan || oppositeDirectionsGreaterThan
-}
-
-exports.Range = Range
-function Range (range, options) {
-  if (!options || typeof options !== 'object') {
-    options = {
-      loose: !!options,
-      includePrerelease: false
-    }
-  }
-
-  if (range instanceof Range) {
-    if (range.loose === !!options.loose &&
-        range.includePrerelease === !!options.includePrerelease) {
-      return range
-    } else {
-      return new Range(range.raw, options)
-    }
-  }
-
-  if (range instanceof Comparator) {
-    return new Range(range.value, options)
-  }
-
-  if (!(this instanceof Range)) {
-    return new Range(range, options)
-  }
-
-  this.options = options
-  this.loose = !!options.loose
-  this.includePrerelease = !!options.includePrerelease
-
-  // First, split based on boolean or ||
-  this.raw = range
-  this.set = range.split(/\s*\|\|\s*/).map(function (range) {
-    return this.parseRange(range.trim())
-  }, this).filter(function (c) {
-    // throw out any that are not relevant for whatever reason
-    return c.length
-  })
-
-  if (!this.set.length) {
-    throw new TypeError('Invalid SemVer Range: ' + range)
-  }
-
-  this.format()
-}
-
-Range.prototype.format = function () {
-  this.range = this.set.map(function (comps) {
-    return comps.join(' ').trim()
-  }).join('||').trim()
-  return this.range
-}
-
-Range.prototype.toString = function () {
-  return this.range
-}
-
-Range.prototype.parseRange = function (range) {
-  var loose = this.options.loose
-  range = range.trim()
-  // `1.2.3 - 1.2.4` => `>=1.2.3 <=1.2.4`
-  var hr = loose ? re[HYPHENRANGELOOSE] : re[HYPHENRANGE]
-  range = range.replace(hr, hyphenReplace)
-  debug('hyphen replace', range)
-  // `> 1.2.3 < 1.2.5` => `>1.2.3 <1.2.5`
-  range = range.replace(re[COMPARATORTRIM], comparatorTrimReplace)
-  debug('comparator trim', range, re[COMPARATORTRIM])
-
-  // `~ 1.2.3` => `~1.2.3`
-  range = range.replace(re[TILDETRIM], tildeTrimReplace)
-
-  // `^ 1.2.3` => `^1.2.3`
-  range = range.replace(re[CARETTRIM], caretTrimReplace)
-
-  // normalize spaces
-  range = range.split(/\s+/).join(' ')
-
-  // At this point, the range is completely trimmed and
-  // ready to be split into comparators.
-
-  var compRe = loose ? re[COMPARATORLOOSE] : re[COMPARATOR]
-  var set = range.split(' ').map(function (comp) {
-    return parseComparator(comp, this.options)
-  }, this).join(' ').split(/\s+/)
-  if (this.options.loose) {
-    // in loose mode, throw out any that are not valid comparators
-    set = set.filter(function (comp) {
-      return !!comp.match(compRe)
-    })
-  }
-  set = set.map(function (comp) {
-    return new Comparator(comp, this.options)
-  }, this)
-
-  return set
-}
-
-Range.prototype.intersects = function (range, options) {
-  if (!(range instanceof Range)) {
-    throw new TypeError('a Range is required')
-  }
-
-  return this.set.some(function (thisComparators) {
-    return thisComparators.every(function (thisComparator) {
-      return range.set.some(function (rangeComparators) {
-        return rangeComparators.every(function (rangeComparator) {
-          return thisComparator.intersects(rangeComparator, options)
-        })
-      })
-    })
-  })
-}
-
-// Mostly just for testing and legacy API reasons
-exports.toComparators = toComparators
-function toComparators (range, options) {
-  return new Range(range, options).set.map(function (comp) {
-    return comp.map(function (c) {
-      return c.value
-    }).join(' ').trim().split(' ')
-  })
-}
-
-// comprised of xranges, tildes, stars, and gtlt's at this point.
-// already replaced the hyphen ranges
-// turn into a set of JUST comparators.
-function parseComparator (comp, options) {
-  debug('comp', comp, options)
-  comp = replaceCarets(comp, options)
-  debug('caret', comp)
-  comp = replaceTildes(comp, options)
-  debug('tildes', comp)
-  comp = replaceXRanges(comp, options)
-  debug('xrange', comp)
-  comp = replaceStars(comp, options)
-  debug('stars', comp)
-  return comp
-}
-
-function isX (id) {
-  return !id || id.toLowerCase() === 'x' || id === '*'
-}
-
-// ~, ~> --> * (any, kinda silly)
-// ~2, ~2.x, ~2.x.x, ~>2, ~>2.x ~>2.x.x --> >=2.0.0 <3.0.0
-// ~2.0, ~2.0.x, ~>2.0, ~>2.0.x --> >=2.0.0 <2.1.0
-// ~1.2, ~1.2.x, ~>1.2, ~>1.2.x --> >=1.2.0 <1.3.0
-// ~1.2.3, ~>1.2.3 --> >=1.2.3 <1.3.0
-// ~1.2.0, ~>1.2.0 --> >=1.2.0 <1.3.0
-function replaceTildes (comp, options) {
-  return comp.trim().split(/\s+/).map(function (comp) {
-    return replaceTilde(comp, options)
-  }).join(' ')
-}
-
-function replaceTilde (comp, options) {
-  var r = options.loose ? re[TILDELOOSE] : re[TILDE]
-  return comp.replace(r, function (_, M, m, p, pr) {
-    debug('tilde', comp, _, M, m, p, pr)
-    var ret
-
-    if (isX(M)) {
-      ret = ''
-    } else if (isX(m)) {
-      ret = '>=' + M + '.0.0 <' + (+M + 1) + '.0.0'
-    } else if (isX(p)) {
-      // ~1.2 == >=1.2.0 <1.3.0
-      ret = '>=' + M + '.' + m + '.0 <' + M + '.' + (+m + 1) + '.0'
-    } else if (pr) {
-      debug('replaceTilde pr', pr)
-      ret = '>=' + M + '.' + m + '.' + p + '-' + pr +
-            ' <' + M + '.' + (+m + 1) + '.0'
-    } else {
-      // ~1.2.3 == >=1.2.3 <1.3.0
-      ret = '>=' + M + '.' + m + '.' + p +
-            ' <' + M + '.' + (+m + 1) + '.0'
-    }
-
-    debug('tilde return', ret)
-    return ret
-  })
-}
-
-// ^ --> * (any, kinda silly)
-// ^2, ^2.x, ^2.x.x --> >=2.0.0 <3.0.0
-// ^2.0, ^2.0.x --> >=2.0.0 <3.0.0
-// ^1.2, ^1.2.x --> >=1.2.0 <2.0.0
-// ^1.2.3 --> >=1.2.3 <2.0.0
-// ^1.2.0 --> >=1.2.0 <2.0.0
-function replaceCarets (comp, options) {
-  return comp.trim().split(/\s+/).map(function (comp) {
-    return replaceCaret(comp, options)
-  }).join(' ')
-}
-
-function replaceCaret (comp, options) {
-  debug('caret', comp, options)
-  var r = options.loose ? re[CARETLOOSE] : re[CARET]
-  return comp.replace(r, function (_, M, m, p, pr) {
-    debug('caret', comp, _, M, m, p, pr)
-    var ret
-
-    if (isX(M)) {
-      ret = ''
-    } else if (isX(m)) {
-      ret = '>=' + M + '.0.0 <' + (+M + 1) + '.0.0'
-    } else if (isX(p)) {
-      if (M === '0') {
-        ret = '>=' + M + '.' + m + '.0 <' + M + '.' + (+m + 1) + '.0'
-      } else {
-        ret = '>=' + M + '.' + m + '.0 <' + (+M + 1) + '.0.0'
-      }
-    } else if (pr) {
-      debug('replaceCaret pr', pr)
-      if (M === '0') {
-        if (m === '0') {
-          ret = '>=' + M + '.' + m + '.' + p + '-' + pr +
-                ' <' + M + '.' + m + '.' + (+p + 1)
-        } else {
-          ret = '>=' + M + '.' + m + '.' + p + '-' + pr +
-                ' <' + M + '.' + (+m + 1) + '.0'
-        }
-      } else {
-        ret = '>=' + M + '.' + m + '.' + p + '-' + pr +
-              ' <' + (+M + 1) + '.0.0'
-      }
-    } else {
-      debug('no pr')
-      if (M === '0') {
-        if (m === '0') {
-          ret = '>=' + M + '.' + m + '.' + p +
-                ' <' + M + '.' + m + '.' + (+p + 1)
-        } else {
-          ret = '>=' + M + '.' + m + '.' + p +
-                ' <' + M + '.' + (+m + 1) + '.0'
-        }
-      } else {
-        ret = '>=' + M + '.' + m + '.' + p +
-              ' <' + (+M + 1) + '.0.0'
-      }
-    }
-
-    debug('caret return', ret)
-    return ret
-  })
-}
-
-function replaceXRanges (comp, options) {
-  debug('replaceXRanges', comp, options)
-  return comp.split(/\s+/).map(function (comp) {
-    return replaceXRange(comp, options)
-  }).join(' ')
-}
-
-function replaceXRange (comp, options) {
-  comp = comp.trim()
-  var r = options.loose ? re[XRANGELOOSE] : re[XRANGE]
-  return comp.replace(r, function (ret, gtlt, M, m, p, pr) {
-    debug('xRange', comp, ret, gtlt, M, m, p, pr)
-    var xM = isX(M)
-    var xm = xM || isX(m)
-    var xp = xm || isX(p)
-    var anyX = xp
-
-    if (gtlt === '=' && anyX) {
-      gtlt = ''
-    }
-
-    if (xM) {
-      if (gtlt === '>' || gtlt === '<') {
-        // nothing is allowed
-        ret = '<0.0.0'
-      } else {
-        // nothing is forbidden
-        ret = '*'
-      }
-    } else if (gtlt && anyX) {
-      // we know patch is an x, because we have any x at all.
-      // replace X with 0
-      if (xm) {
-        m = 0
-      }
-      p = 0
-
-      if (gtlt === '>') {
-        // >1 => >=2.0.0
-        // >1.2 => >=1.3.0
-        // >1.2.3 => >= 1.2.4
-        gtlt = '>='
-        if (xm) {
-          M = +M + 1
-          m = 0
-          p = 0
-        } else {
-          m = +m + 1
-          p = 0
-        }
-      } else if (gtlt === '<=') {
-        // <=0.7.x is actually <0.8.0, since any 0.7.x should
-        // pass.  Similarly, <=7.x is actually <8.0.0, etc.
-        gtlt = '<'
-        if (xm) {
-          M = +M + 1
-        } else {
-          m = +m + 1
-        }
-      }
-
-      ret = gtlt + M + '.' + m + '.' + p
-    } else if (xm) {
-      ret = '>=' + M + '.0.0 <' + (+M + 1) + '.0.0'
-    } else if (xp) {
-      ret = '>=' + M + '.' + m + '.0 <' + M + '.' + (+m + 1) + '.0'
-    }
-
-    debug('xRange return', ret)
-
-    return ret
-  })
-}
-
-// Because * is AND-ed with everything else in the comparator,
-// and '' means "any version", just remove the *s entirely.
-function replaceStars (comp, options) {
-  debug('replaceStars', comp, options)
-  // Looseness is ignored here.  star is always as loose as it gets!
-  return comp.trim().replace(re[STAR], '')
-}
-
-// This function is passed to string.replace(re[HYPHENRANGE])
-// M, m, patch, prerelease, build
-// 1.2 - 3.4.5 => >=1.2.0 <=3.4.5
-// 1.2.3 - 3.4 => >=1.2.0 <3.5.0 Any 3.4.x will do
-// 1.2 - 3.4 => >=1.2.0 <3.5.0
-function hyphenReplace ($0,
-  from, fM, fm, fp, fpr, fb,
-  to, tM, tm, tp, tpr, tb) {
-  if (isX(fM)) {
-    from = ''
-  } else if (isX(fm)) {
-    from = '>=' + fM + '.0.0'
-  } else if (isX(fp)) {
-    from = '>=' + fM + '.' + fm + '.0'
-  } else {
-    from = '>=' + from
-  }
-
-  if (isX(tM)) {
-    to = ''
-  } else if (isX(tm)) {
-    to = '<' + (+tM + 1) + '.0.0'
-  } else if (isX(tp)) {
-    to = '<' + tM + '.' + (+tm + 1) + '.0'
-  } else if (tpr) {
-    to = '<=' + tM + '.' + tm + '.' + tp + '-' + tpr
-  } else {
-    to = '<=' + to
-  }
-
-  return (from + ' ' + to).trim()
-}
-
-// if ANY of the sets match ALL of its comparators, then pass
-Range.prototype.test = function (version) {
-  if (!version) {
-    return false
-  }
-
-  if (typeof version === 'string') {
-    version = new SemVer(version, this.options)
-  }
-
-  for (var i = 0; i < this.set.length; i++) {
-    if (testSet(this.set[i], version, this.options)) {
-      return true
-    }
-  }
-  return false
-}
-
-function testSet (set, version, options) {
-  for (var i = 0; i < set.length; i++) {
-    if (!set[i].test(version)) {
-      return false
-    }
-  }
-
-  if (version.prerelease.length && !options.includePrerelease) {
-    // Find the set of versions that are allowed to have prereleases
-    // For example, ^1.2.3-pr.1 desugars to >=1.2.3-pr.1 <2.0.0
-    // That should allow `1.2.3-pr.2` to pass.
-    // However, `1.2.4-alpha.notready` should NOT be allowed,
-    // even though it's within the range set by the comparators.
-    for (i = 0; i < set.length; i++) {
-      debug(set[i].semver)
-      if (set[i].semver === ANY) {
-        continue
-      }
-
-      if (set[i].semver.prerelease.length > 0) {
-        var allowed = set[i].semver
-        if (allowed.major === version.major &&
-            allowed.minor === version.minor &&
-            allowed.patch === version.patch) {
-          return true
+    const v1 = parse(version1)
+    const v2 = parse(version2)
+    const hasPre = v1.prerelease.length || v2.prerelease.length
+    const prefix = hasPre ? 'pre' : ''
+    const defaultResult = hasPre ? 'prerelease' : ''
+    for (const key in v1) {
+      if (key === 'major' || key === 'minor' || key === 'patch') {
+        if (v1[key] !== v2[key]) {
+          return prefix + key
         }
       }
     }
+    return defaultResult // may be undefined
+  }
+}
+module.exports = diff
 
-    // Version has a -pre, but it's not one of the ones we like.
-    return false
+
+/***/ }),
+
+/***/ 4707:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const compare = __nccwpck_require__(2485)
+const eq = (a, b, loose) => compare(a, b, loose) === 0
+module.exports = eq
+
+
+/***/ }),
+
+/***/ 5930:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const compare = __nccwpck_require__(2485)
+const gt = (a, b, loose) => compare(a, b, loose) > 0
+module.exports = gt
+
+
+/***/ }),
+
+/***/ 6545:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const compare = __nccwpck_require__(2485)
+const gte = (a, b, loose) => compare(a, b, loose) >= 0
+module.exports = gte
+
+
+/***/ }),
+
+/***/ 208:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const SemVer = __nccwpck_require__(9068)
+
+const inc = (version, release, options, identifier) => {
+  if (typeof (options) === 'string') {
+    identifier = options
+    options = undefined
   }
 
-  return true
+  try {
+    return new SemVer(
+      version instanceof SemVer ? version.version : version,
+      options
+    ).inc(release, identifier).version
+  } catch (er) {
+    return null
+  }
+}
+module.exports = inc
+
+
+/***/ }),
+
+/***/ 1598:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const compare = __nccwpck_require__(2485)
+const lt = (a, b, loose) => compare(a, b, loose) < 0
+module.exports = lt
+
+
+/***/ }),
+
+/***/ 8468:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const compare = __nccwpck_require__(2485)
+const lte = (a, b, loose) => compare(a, b, loose) <= 0
+module.exports = lte
+
+
+/***/ }),
+
+/***/ 9423:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const SemVer = __nccwpck_require__(9068)
+const major = (a, loose) => new SemVer(a, loose).major
+module.exports = major
+
+
+/***/ }),
+
+/***/ 7982:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const SemVer = __nccwpck_require__(9068)
+const minor = (a, loose) => new SemVer(a, loose).minor
+module.exports = minor
+
+
+/***/ }),
+
+/***/ 5821:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const compare = __nccwpck_require__(2485)
+const neq = (a, b, loose) => compare(a, b, loose) !== 0
+module.exports = neq
+
+
+/***/ }),
+
+/***/ 7218:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const { MAX_LENGTH } = __nccwpck_require__(7532)
+const { re, t } = __nccwpck_require__(8207)
+const SemVer = __nccwpck_require__(9068)
+
+const parseOptions = __nccwpck_require__(3144)
+const parse = (version, options) => {
+  options = parseOptions(options)
+
+  if (version instanceof SemVer) {
+    return version
+  }
+
+  if (typeof version !== 'string') {
+    return null
+  }
+
+  if (version.length > MAX_LENGTH) {
+    return null
+  }
+
+  const r = options.loose ? re[t.LOOSE] : re[t.FULL]
+  if (!r.test(version)) {
+    return null
+  }
+
+  try {
+    return new SemVer(version, options)
+  } catch (er) {
+    return null
+  }
 }
 
-exports.satisfies = satisfies
-function satisfies (version, range, options) {
+module.exports = parse
+
+
+/***/ }),
+
+/***/ 5238:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const SemVer = __nccwpck_require__(9068)
+const patch = (a, loose) => new SemVer(a, loose).patch
+module.exports = patch
+
+
+/***/ }),
+
+/***/ 9170:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const parse = __nccwpck_require__(7218)
+const prerelease = (version, options) => {
+  const parsed = parse(version, options)
+  return (parsed && parsed.prerelease.length) ? parsed.prerelease : null
+}
+module.exports = prerelease
+
+
+/***/ }),
+
+/***/ 3345:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const compare = __nccwpck_require__(2485)
+const rcompare = (a, b, loose) => compare(b, a, loose)
+module.exports = rcompare
+
+
+/***/ }),
+
+/***/ 5267:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const compareBuild = __nccwpck_require__(471)
+const rsort = (list, loose) => list.sort((a, b) => compareBuild(b, a, loose))
+module.exports = rsort
+
+
+/***/ }),
+
+/***/ 6822:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const Range = __nccwpck_require__(2594)
+const satisfies = (version, range, options) => {
   try {
     range = new Range(range, options)
   } catch (er) {
@@ -16819,17 +17478,418 @@ function satisfies (version, range, options) {
   }
   return range.test(version)
 }
+module.exports = satisfies
 
-exports.maxSatisfying = maxSatisfying
-function maxSatisfying (versions, range, options) {
-  var max = null
-  var maxSV = null
+
+/***/ }),
+
+/***/ 6268:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const compareBuild = __nccwpck_require__(471)
+const sort = (list, loose) => list.sort((a, b) => compareBuild(a, b, loose))
+module.exports = sort
+
+
+/***/ }),
+
+/***/ 2906:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const parse = __nccwpck_require__(7218)
+const valid = (version, options) => {
+  const v = parse(version, options)
+  return v ? v.version : null
+}
+module.exports = valid
+
+
+/***/ }),
+
+/***/ 4595:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+// just pre-load all the stuff that index.js lazily exports
+const internalRe = __nccwpck_require__(8207)
+module.exports = {
+  re: internalRe.re,
+  src: internalRe.src,
+  tokens: internalRe.t,
+  SEMVER_SPEC_VERSION: __nccwpck_require__(7532).SEMVER_SPEC_VERSION,
+  SemVer: __nccwpck_require__(9068),
+  compareIdentifiers: __nccwpck_require__(730).compareIdentifiers,
+  rcompareIdentifiers: __nccwpck_require__(730).rcompareIdentifiers,
+  parse: __nccwpck_require__(7218),
+  valid: __nccwpck_require__(2906),
+  clean: __nccwpck_require__(3711),
+  inc: __nccwpck_require__(208),
+  diff: __nccwpck_require__(7211),
+  major: __nccwpck_require__(9423),
+  minor: __nccwpck_require__(7982),
+  patch: __nccwpck_require__(5238),
+  prerelease: __nccwpck_require__(9170),
+  compare: __nccwpck_require__(2485),
+  rcompare: __nccwpck_require__(3345),
+  compareLoose: __nccwpck_require__(4706),
+  compareBuild: __nccwpck_require__(471),
+  sort: __nccwpck_require__(6268),
+  rsort: __nccwpck_require__(5267),
+  gt: __nccwpck_require__(5930),
+  lt: __nccwpck_require__(1598),
+  eq: __nccwpck_require__(4707),
+  neq: __nccwpck_require__(5821),
+  gte: __nccwpck_require__(6545),
+  lte: __nccwpck_require__(8468),
+  cmp: __nccwpck_require__(4219),
+  coerce: __nccwpck_require__(9838),
+  Comparator: __nccwpck_require__(7966),
+  Range: __nccwpck_require__(2594),
+  satisfies: __nccwpck_require__(6822),
+  toComparators: __nccwpck_require__(9194),
+  maxSatisfying: __nccwpck_require__(9541),
+  minSatisfying: __nccwpck_require__(313),
+  minVersion: __nccwpck_require__(2607),
+  validRange: __nccwpck_require__(3097),
+  outside: __nccwpck_require__(3159),
+  gtr: __nccwpck_require__(7821),
+  ltr: __nccwpck_require__(2478),
+  intersects: __nccwpck_require__(3190),
+  simplifyRange: __nccwpck_require__(25),
+  subset: __nccwpck_require__(7666),
+}
+
+
+/***/ }),
+
+/***/ 7532:
+/***/ ((module) => {
+
+// Note: this is the semver.org version of the spec that it implements
+// Not necessarily the package version of this code.
+const SEMVER_SPEC_VERSION = '2.0.0'
+
+const MAX_LENGTH = 256
+const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER ||
+/* istanbul ignore next */ 9007199254740991
+
+// Max safe segment length for coercion.
+const MAX_SAFE_COMPONENT_LENGTH = 16
+
+module.exports = {
+  SEMVER_SPEC_VERSION,
+  MAX_LENGTH,
+  MAX_SAFE_INTEGER,
+  MAX_SAFE_COMPONENT_LENGTH,
+}
+
+
+/***/ }),
+
+/***/ 7690:
+/***/ ((module) => {
+
+const debug = (
+  typeof process === 'object' &&
+  process.env &&
+  process.env.NODE_DEBUG &&
+  /\bsemver\b/i.test(process.env.NODE_DEBUG)
+) ? (...args) => console.error('SEMVER', ...args)
+  : () => {}
+
+module.exports = debug
+
+
+/***/ }),
+
+/***/ 730:
+/***/ ((module) => {
+
+const numeric = /^[0-9]+$/
+const compareIdentifiers = (a, b) => {
+  const anum = numeric.test(a)
+  const bnum = numeric.test(b)
+
+  if (anum && bnum) {
+    a = +a
+    b = +b
+  }
+
+  return a === b ? 0
+    : (anum && !bnum) ? -1
+    : (bnum && !anum) ? 1
+    : a < b ? -1
+    : 1
+}
+
+const rcompareIdentifiers = (a, b) => compareIdentifiers(b, a)
+
+module.exports = {
+  compareIdentifiers,
+  rcompareIdentifiers,
+}
+
+
+/***/ }),
+
+/***/ 3144:
+/***/ ((module) => {
+
+// parse out just the options we care about so we always get a consistent
+// obj with keys in a consistent order.
+const opts = ['includePrerelease', 'loose', 'rtl']
+const parseOptions = options =>
+  !options ? {}
+  : typeof options !== 'object' ? { loose: true }
+  : opts.filter(k => options[k]).reduce((o, k) => {
+    o[k] = true
+    return o
+  }, {})
+module.exports = parseOptions
+
+
+/***/ }),
+
+/***/ 8207:
+/***/ ((module, exports, __nccwpck_require__) => {
+
+const { MAX_SAFE_COMPONENT_LENGTH } = __nccwpck_require__(7532)
+const debug = __nccwpck_require__(7690)
+exports = module.exports = {}
+
+// The actual regexps go on exports.re
+const re = exports.re = []
+const src = exports.src = []
+const t = exports.t = {}
+let R = 0
+
+const createToken = (name, value, isGlobal) => {
+  const index = R++
+  debug(name, index, value)
+  t[name] = index
+  src[index] = value
+  re[index] = new RegExp(value, isGlobal ? 'g' : undefined)
+}
+
+// The following Regular Expressions can be used for tokenizing,
+// validating, and parsing SemVer version strings.
+
+// ## Numeric Identifier
+// A single `0`, or a non-zero digit followed by zero or more digits.
+
+createToken('NUMERICIDENTIFIER', '0|[1-9]\\d*')
+createToken('NUMERICIDENTIFIERLOOSE', '[0-9]+')
+
+// ## Non-numeric Identifier
+// Zero or more digits, followed by a letter or hyphen, and then zero or
+// more letters, digits, or hyphens.
+
+createToken('NONNUMERICIDENTIFIER', '\\d*[a-zA-Z-][a-zA-Z0-9-]*')
+
+// ## Main Version
+// Three dot-separated numeric identifiers.
+
+createToken('MAINVERSION', `(${src[t.NUMERICIDENTIFIER]})\\.` +
+                   `(${src[t.NUMERICIDENTIFIER]})\\.` +
+                   `(${src[t.NUMERICIDENTIFIER]})`)
+
+createToken('MAINVERSIONLOOSE', `(${src[t.NUMERICIDENTIFIERLOOSE]})\\.` +
+                        `(${src[t.NUMERICIDENTIFIERLOOSE]})\\.` +
+                        `(${src[t.NUMERICIDENTIFIERLOOSE]})`)
+
+// ## Pre-release Version Identifier
+// A numeric identifier, or a non-numeric identifier.
+
+createToken('PRERELEASEIDENTIFIER', `(?:${src[t.NUMERICIDENTIFIER]
+}|${src[t.NONNUMERICIDENTIFIER]})`)
+
+createToken('PRERELEASEIDENTIFIERLOOSE', `(?:${src[t.NUMERICIDENTIFIERLOOSE]
+}|${src[t.NONNUMERICIDENTIFIER]})`)
+
+// ## Pre-release Version
+// Hyphen, followed by one or more dot-separated pre-release version
+// identifiers.
+
+createToken('PRERELEASE', `(?:-(${src[t.PRERELEASEIDENTIFIER]
+}(?:\\.${src[t.PRERELEASEIDENTIFIER]})*))`)
+
+createToken('PRERELEASELOOSE', `(?:-?(${src[t.PRERELEASEIDENTIFIERLOOSE]
+}(?:\\.${src[t.PRERELEASEIDENTIFIERLOOSE]})*))`)
+
+// ## Build Metadata Identifier
+// Any combination of digits, letters, or hyphens.
+
+createToken('BUILDIDENTIFIER', '[0-9A-Za-z-]+')
+
+// ## Build Metadata
+// Plus sign, followed by one or more period-separated build metadata
+// identifiers.
+
+createToken('BUILD', `(?:\\+(${src[t.BUILDIDENTIFIER]
+}(?:\\.${src[t.BUILDIDENTIFIER]})*))`)
+
+// ## Full Version String
+// A main version, followed optionally by a pre-release version and
+// build metadata.
+
+// Note that the only major, minor, patch, and pre-release sections of
+// the version string are capturing groups.  The build metadata is not a
+// capturing group, because it should not ever be used in version
+// comparison.
+
+createToken('FULLPLAIN', `v?${src[t.MAINVERSION]
+}${src[t.PRERELEASE]}?${
+  src[t.BUILD]}?`)
+
+createToken('FULL', `^${src[t.FULLPLAIN]}$`)
+
+// like full, but allows v1.2.3 and =1.2.3, which people do sometimes.
+// also, 1.0.0alpha1 (prerelease without the hyphen) which is pretty
+// common in the npm registry.
+createToken('LOOSEPLAIN', `[v=\\s]*${src[t.MAINVERSIONLOOSE]
+}${src[t.PRERELEASELOOSE]}?${
+  src[t.BUILD]}?`)
+
+createToken('LOOSE', `^${src[t.LOOSEPLAIN]}$`)
+
+createToken('GTLT', '((?:<|>)?=?)')
+
+// Something like "2.*" or "1.2.x".
+// Note that "x.x" is a valid xRange identifer, meaning "any version"
+// Only the first item is strictly required.
+createToken('XRANGEIDENTIFIERLOOSE', `${src[t.NUMERICIDENTIFIERLOOSE]}|x|X|\\*`)
+createToken('XRANGEIDENTIFIER', `${src[t.NUMERICIDENTIFIER]}|x|X|\\*`)
+
+createToken('XRANGEPLAIN', `[v=\\s]*(${src[t.XRANGEIDENTIFIER]})` +
+                   `(?:\\.(${src[t.XRANGEIDENTIFIER]})` +
+                   `(?:\\.(${src[t.XRANGEIDENTIFIER]})` +
+                   `(?:${src[t.PRERELEASE]})?${
+                     src[t.BUILD]}?` +
+                   `)?)?`)
+
+createToken('XRANGEPLAINLOOSE', `[v=\\s]*(${src[t.XRANGEIDENTIFIERLOOSE]})` +
+                        `(?:\\.(${src[t.XRANGEIDENTIFIERLOOSE]})` +
+                        `(?:\\.(${src[t.XRANGEIDENTIFIERLOOSE]})` +
+                        `(?:${src[t.PRERELEASELOOSE]})?${
+                          src[t.BUILD]}?` +
+                        `)?)?`)
+
+createToken('XRANGE', `^${src[t.GTLT]}\\s*${src[t.XRANGEPLAIN]}$`)
+createToken('XRANGELOOSE', `^${src[t.GTLT]}\\s*${src[t.XRANGEPLAINLOOSE]}$`)
+
+// Coercion.
+// Extract anything that could conceivably be a part of a valid semver
+createToken('COERCE', `${'(^|[^\\d])' +
+              '(\\d{1,'}${MAX_SAFE_COMPONENT_LENGTH}})` +
+              `(?:\\.(\\d{1,${MAX_SAFE_COMPONENT_LENGTH}}))?` +
+              `(?:\\.(\\d{1,${MAX_SAFE_COMPONENT_LENGTH}}))?` +
+              `(?:$|[^\\d])`)
+createToken('COERCERTL', src[t.COERCE], true)
+
+// Tilde ranges.
+// Meaning is "reasonably at or greater than"
+createToken('LONETILDE', '(?:~>?)')
+
+createToken('TILDETRIM', `(\\s*)${src[t.LONETILDE]}\\s+`, true)
+exports.tildeTrimReplace = '$1~'
+
+createToken('TILDE', `^${src[t.LONETILDE]}${src[t.XRANGEPLAIN]}$`)
+createToken('TILDELOOSE', `^${src[t.LONETILDE]}${src[t.XRANGEPLAINLOOSE]}$`)
+
+// Caret ranges.
+// Meaning is "at least and backwards compatible with"
+createToken('LONECARET', '(?:\\^)')
+
+createToken('CARETTRIM', `(\\s*)${src[t.LONECARET]}\\s+`, true)
+exports.caretTrimReplace = '$1^'
+
+createToken('CARET', `^${src[t.LONECARET]}${src[t.XRANGEPLAIN]}$`)
+createToken('CARETLOOSE', `^${src[t.LONECARET]}${src[t.XRANGEPLAINLOOSE]}$`)
+
+// A simple gt/lt/eq thing, or just "" to indicate "any version"
+createToken('COMPARATORLOOSE', `^${src[t.GTLT]}\\s*(${src[t.LOOSEPLAIN]})$|^$`)
+createToken('COMPARATOR', `^${src[t.GTLT]}\\s*(${src[t.FULLPLAIN]})$|^$`)
+
+// An expression to strip any whitespace between the gtlt and the thing
+// it modifies, so that `> 1.2.3` ==> `>1.2.3`
+createToken('COMPARATORTRIM', `(\\s*)${src[t.GTLT]
+}\\s*(${src[t.LOOSEPLAIN]}|${src[t.XRANGEPLAIN]})`, true)
+exports.comparatorTrimReplace = '$1$2$3'
+
+// Something like `1.2.3 - 1.2.4`
+// Note that these all use the loose form, because they'll be
+// checked against either the strict or loose comparator form
+// later.
+createToken('HYPHENRANGE', `^\\s*(${src[t.XRANGEPLAIN]})` +
+                   `\\s+-\\s+` +
+                   `(${src[t.XRANGEPLAIN]})` +
+                   `\\s*$`)
+
+createToken('HYPHENRANGELOOSE', `^\\s*(${src[t.XRANGEPLAINLOOSE]})` +
+                        `\\s+-\\s+` +
+                        `(${src[t.XRANGEPLAINLOOSE]})` +
+                        `\\s*$`)
+
+// Star ranges basically just allow anything at all.
+createToken('STAR', '(<|>)?=?\\s*\\*')
+// >=0.0.0 is like a star
+createToken('GTE0', '^\\s*>=\\s*0\\.0\\.0\\s*$')
+createToken('GTE0PRE', '^\\s*>=\\s*0\\.0\\.0-0\\s*$')
+
+
+/***/ }),
+
+/***/ 7821:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+// Determine if version is greater than all the versions possible in the range.
+const outside = __nccwpck_require__(3159)
+const gtr = (version, range, options) => outside(version, range, '>', options)
+module.exports = gtr
+
+
+/***/ }),
+
+/***/ 3190:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const Range = __nccwpck_require__(2594)
+const intersects = (r1, r2, options) => {
+  r1 = new Range(r1, options)
+  r2 = new Range(r2, options)
+  return r1.intersects(r2)
+}
+module.exports = intersects
+
+
+/***/ }),
+
+/***/ 2478:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const outside = __nccwpck_require__(3159)
+// Determine if version is less than all the versions possible in the range
+const ltr = (version, range, options) => outside(version, range, '<', options)
+module.exports = ltr
+
+
+/***/ }),
+
+/***/ 9541:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const SemVer = __nccwpck_require__(9068)
+const Range = __nccwpck_require__(2594)
+
+const maxSatisfying = (versions, range, options) => {
+  let max = null
+  let maxSV = null
+  let rangeObj = null
   try {
-    var rangeObj = new Range(range, options)
+    rangeObj = new Range(range, options)
   } catch (er) {
     return null
   }
-  versions.forEach(function (v) {
+  versions.forEach((v) => {
     if (rangeObj.test(v)) {
       // satisfies(v, range, options)
       if (!max || maxSV.compare(v) === -1) {
@@ -16841,17 +17901,26 @@ function maxSatisfying (versions, range, options) {
   })
   return max
 }
+module.exports = maxSatisfying
 
-exports.minSatisfying = minSatisfying
-function minSatisfying (versions, range, options) {
-  var min = null
-  var minSV = null
+
+/***/ }),
+
+/***/ 313:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const SemVer = __nccwpck_require__(9068)
+const Range = __nccwpck_require__(2594)
+const minSatisfying = (versions, range, options) => {
+  let min = null
+  let minSV = null
+  let rangeObj = null
   try {
-    var rangeObj = new Range(range, options)
+    rangeObj = new Range(range, options)
   } catch (er) {
     return null
   }
-  versions.forEach(function (v) {
+  versions.forEach((v) => {
     if (rangeObj.test(v)) {
       // satisfies(v, range, options)
       if (!min || minSV.compare(v) === 1) {
@@ -16863,12 +17932,22 @@ function minSatisfying (versions, range, options) {
   })
   return min
 }
+module.exports = minSatisfying
 
-exports.minVersion = minVersion
-function minVersion (range, loose) {
+
+/***/ }),
+
+/***/ 2607:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const SemVer = __nccwpck_require__(9068)
+const Range = __nccwpck_require__(2594)
+const gt = __nccwpck_require__(5930)
+
+const minVersion = (range, loose) => {
   range = new Range(range, loose)
 
-  var minver = new SemVer('0.0.0')
+  let minver = new SemVer('0.0.0')
   if (range.test(minver)) {
     return minver
   }
@@ -16879,12 +17958,13 @@ function minVersion (range, loose) {
   }
 
   minver = null
-  for (var i = 0; i < range.set.length; ++i) {
-    var comparators = range.set[i]
+  for (let i = 0; i < range.set.length; ++i) {
+    const comparators = range.set[i]
 
-    comparators.forEach(function (comparator) {
+    let setMin = null
+    comparators.forEach((comparator) => {
       // Clone to avoid manipulating the comparator's semver object.
-      var compver = new SemVer(comparator.semver.version)
+      const compver = new SemVer(comparator.semver.version)
       switch (comparator.operator) {
         case '>':
           if (compver.prerelease.length === 0) {
@@ -16896,8 +17976,8 @@ function minVersion (range, loose) {
           /* fallthrough */
         case '':
         case '>=':
-          if (!minver || gt(minver, compver)) {
-            minver = compver
+          if (!setMin || gt(compver, setMin)) {
+            setMin = compver
           }
           break
         case '<':
@@ -16906,9 +17986,12 @@ function minVersion (range, loose) {
           break
         /* istanbul ignore next */
         default:
-          throw new Error('Unexpected operation: ' + comparator.operator)
+          throw new Error(`Unexpected operation: ${comparator.operator}`)
       }
     })
+    if (setMin && (!minver || gt(minver, setMin))) {
+      minver = setMin
+    }
   }
 
   if (minver && range.test(minver)) {
@@ -16917,36 +18000,29 @@ function minVersion (range, loose) {
 
   return null
 }
+module.exports = minVersion
 
-exports.validRange = validRange
-function validRange (range, options) {
-  try {
-    // Return '*' instead of '' so that truthiness works.
-    // This will throw if it's invalid anyway
-    return new Range(range, options).range || '*'
-  } catch (er) {
-    return null
-  }
-}
 
-// Determine if version is less than all the versions possible in the range
-exports.ltr = ltr
-function ltr (version, range, options) {
-  return outside(version, range, '<', options)
-}
+/***/ }),
 
-// Determine if version is greater than all the versions possible in the range.
-exports.gtr = gtr
-function gtr (version, range, options) {
-  return outside(version, range, '>', options)
-}
+/***/ 3159:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-exports.outside = outside
-function outside (version, range, hilo, options) {
+const SemVer = __nccwpck_require__(9068)
+const Comparator = __nccwpck_require__(7966)
+const { ANY } = Comparator
+const Range = __nccwpck_require__(2594)
+const satisfies = __nccwpck_require__(6822)
+const gt = __nccwpck_require__(5930)
+const lt = __nccwpck_require__(1598)
+const lte = __nccwpck_require__(8468)
+const gte = __nccwpck_require__(6545)
+
+const outside = (version, range, hilo, options) => {
   version = new SemVer(version, options)
   range = new Range(range, options)
 
-  var gtfn, ltefn, ltfn, comp, ecomp
+  let gtfn, ltefn, ltfn, comp, ecomp
   switch (hilo) {
     case '>':
       gtfn = gt
@@ -16966,7 +18042,7 @@ function outside (version, range, hilo, options) {
       throw new TypeError('Must provide a hilo val of "<" or ">"')
   }
 
-  // If it satisifes the range it is not outside
+  // If it satisfies the range it is not outside
   if (satisfies(version, range, options)) {
     return false
   }
@@ -16974,13 +18050,13 @@ function outside (version, range, hilo, options) {
   // From now on, variable terms are as if we're in "gtr" mode.
   // but note that everything is flipped for the "ltr" function.
 
-  for (var i = 0; i < range.set.length; ++i) {
-    var comparators = range.set[i]
+  for (let i = 0; i < range.set.length; ++i) {
+    const comparators = range.set[i]
 
-    var high = null
-    var low = null
+    let high = null
+    let low = null
 
-    comparators.forEach(function (comparator) {
+    comparators.forEach((comparator) => {
       if (comparator.semver === ANY) {
         comparator = new Comparator('>=0.0.0')
       }
@@ -17011,39 +18087,345 @@ function outside (version, range, hilo, options) {
   return true
 }
 
-exports.prerelease = prerelease
-function prerelease (version, options) {
-  var parsed = parse(version, options)
-  return (parsed && parsed.prerelease.length) ? parsed.prerelease : null
-}
+module.exports = outside
 
-exports.intersects = intersects
-function intersects (r1, r2, options) {
-  r1 = new Range(r1, options)
-  r2 = new Range(r2, options)
-  return r1.intersects(r2)
-}
 
-exports.coerce = coerce
-function coerce (version) {
-  if (version instanceof SemVer) {
-    return version
+/***/ }),
+
+/***/ 25:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+// given a set of versions and a range, create a "simplified" range
+// that includes the same versions that the original range does
+// If the original range is shorter than the simplified one, return that.
+const satisfies = __nccwpck_require__(6822)
+const compare = __nccwpck_require__(2485)
+module.exports = (versions, range, options) => {
+  const set = []
+  let first = null
+  let prev = null
+  const v = versions.sort((a, b) => compare(a, b, options))
+  for (const version of v) {
+    const included = satisfies(version, range, options)
+    if (included) {
+      prev = version
+      if (!first) {
+        first = version
+      }
+    } else {
+      if (prev) {
+        set.push([first, prev])
+      }
+      prev = null
+      first = null
+    }
+  }
+  if (first) {
+    set.push([first, null])
   }
 
-  if (typeof version !== 'string') {
+  const ranges = []
+  for (const [min, max] of set) {
+    if (min === max) {
+      ranges.push(min)
+    } else if (!max && min === v[0]) {
+      ranges.push('*')
+    } else if (!max) {
+      ranges.push(`>=${min}`)
+    } else if (min === v[0]) {
+      ranges.push(`<=${max}`)
+    } else {
+      ranges.push(`${min} - ${max}`)
+    }
+  }
+  const simplified = ranges.join(' || ')
+  const original = typeof range.raw === 'string' ? range.raw : String(range)
+  return simplified.length < original.length ? simplified : range
+}
+
+
+/***/ }),
+
+/***/ 7666:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const Range = __nccwpck_require__(2594)
+const Comparator = __nccwpck_require__(7966)
+const { ANY } = Comparator
+const satisfies = __nccwpck_require__(6822)
+const compare = __nccwpck_require__(2485)
+
+// Complex range `r1 || r2 || ...` is a subset of `R1 || R2 || ...` iff:
+// - Every simple range `r1, r2, ...` is a null set, OR
+// - Every simple range `r1, r2, ...` which is not a null set is a subset of
+//   some `R1, R2, ...`
+//
+// Simple range `c1 c2 ...` is a subset of simple range `C1 C2 ...` iff:
+// - If c is only the ANY comparator
+//   - If C is only the ANY comparator, return true
+//   - Else if in prerelease mode, return false
+//   - else replace c with `[>=0.0.0]`
+// - If C is only the ANY comparator
+//   - if in prerelease mode, return true
+//   - else replace C with `[>=0.0.0]`
+// - Let EQ be the set of = comparators in c
+// - If EQ is more than one, return true (null set)
+// - Let GT be the highest > or >= comparator in c
+// - Let LT be the lowest < or <= comparator in c
+// - If GT and LT, and GT.semver > LT.semver, return true (null set)
+// - If any C is a = range, and GT or LT are set, return false
+// - If EQ
+//   - If GT, and EQ does not satisfy GT, return true (null set)
+//   - If LT, and EQ does not satisfy LT, return true (null set)
+//   - If EQ satisfies every C, return true
+//   - Else return false
+// - If GT
+//   - If GT.semver is lower than any > or >= comp in C, return false
+//   - If GT is >=, and GT.semver does not satisfy every C, return false
+//   - If GT.semver has a prerelease, and not in prerelease mode
+//     - If no C has a prerelease and the GT.semver tuple, return false
+// - If LT
+//   - If LT.semver is greater than any < or <= comp in C, return false
+//   - If LT is <=, and LT.semver does not satisfy every C, return false
+//   - If GT.semver has a prerelease, and not in prerelease mode
+//     - If no C has a prerelease and the LT.semver tuple, return false
+// - Else return true
+
+const subset = (sub, dom, options = {}) => {
+  if (sub === dom) {
+    return true
+  }
+
+  sub = new Range(sub, options)
+  dom = new Range(dom, options)
+  let sawNonNull = false
+
+  OUTER: for (const simpleSub of sub.set) {
+    for (const simpleDom of dom.set) {
+      const isSub = simpleSubset(simpleSub, simpleDom, options)
+      sawNonNull = sawNonNull || isSub !== null
+      if (isSub) {
+        continue OUTER
+      }
+    }
+    // the null set is a subset of everything, but null simple ranges in
+    // a complex range should be ignored.  so if we saw a non-null range,
+    // then we know this isn't a subset, but if EVERY simple range was null,
+    // then it is a subset.
+    if (sawNonNull) {
+      return false
+    }
+  }
+  return true
+}
+
+const simpleSubset = (sub, dom, options) => {
+  if (sub === dom) {
+    return true
+  }
+
+  if (sub.length === 1 && sub[0].semver === ANY) {
+    if (dom.length === 1 && dom[0].semver === ANY) {
+      return true
+    } else if (options.includePrerelease) {
+      sub = [new Comparator('>=0.0.0-0')]
+    } else {
+      sub = [new Comparator('>=0.0.0')]
+    }
+  }
+
+  if (dom.length === 1 && dom[0].semver === ANY) {
+    if (options.includePrerelease) {
+      return true
+    } else {
+      dom = [new Comparator('>=0.0.0')]
+    }
+  }
+
+  const eqSet = new Set()
+  let gt, lt
+  for (const c of sub) {
+    if (c.operator === '>' || c.operator === '>=') {
+      gt = higherGT(gt, c, options)
+    } else if (c.operator === '<' || c.operator === '<=') {
+      lt = lowerLT(lt, c, options)
+    } else {
+      eqSet.add(c.semver)
+    }
+  }
+
+  if (eqSet.size > 1) {
     return null
   }
 
-  var match = version.match(re[COERCE])
-
-  if (match == null) {
-    return null
+  let gtltComp
+  if (gt && lt) {
+    gtltComp = compare(gt.semver, lt.semver, options)
+    if (gtltComp > 0) {
+      return null
+    } else if (gtltComp === 0 && (gt.operator !== '>=' || lt.operator !== '<=')) {
+      return null
+    }
   }
 
-  return parse(match[1] +
-    '.' + (match[2] || '0') +
-    '.' + (match[3] || '0'))
+  // will iterate one or zero times
+  for (const eq of eqSet) {
+    if (gt && !satisfies(eq, String(gt), options)) {
+      return null
+    }
+
+    if (lt && !satisfies(eq, String(lt), options)) {
+      return null
+    }
+
+    for (const c of dom) {
+      if (!satisfies(eq, String(c), options)) {
+        return false
+      }
+    }
+
+    return true
+  }
+
+  let higher, lower
+  let hasDomLT, hasDomGT
+  // if the subset has a prerelease, we need a comparator in the superset
+  // with the same tuple and a prerelease, or it's not a subset
+  let needDomLTPre = lt &&
+    !options.includePrerelease &&
+    lt.semver.prerelease.length ? lt.semver : false
+  let needDomGTPre = gt &&
+    !options.includePrerelease &&
+    gt.semver.prerelease.length ? gt.semver : false
+  // exception: <1.2.3-0 is the same as <1.2.3
+  if (needDomLTPre && needDomLTPre.prerelease.length === 1 &&
+      lt.operator === '<' && needDomLTPre.prerelease[0] === 0) {
+    needDomLTPre = false
+  }
+
+  for (const c of dom) {
+    hasDomGT = hasDomGT || c.operator === '>' || c.operator === '>='
+    hasDomLT = hasDomLT || c.operator === '<' || c.operator === '<='
+    if (gt) {
+      if (needDomGTPre) {
+        if (c.semver.prerelease && c.semver.prerelease.length &&
+            c.semver.major === needDomGTPre.major &&
+            c.semver.minor === needDomGTPre.minor &&
+            c.semver.patch === needDomGTPre.patch) {
+          needDomGTPre = false
+        }
+      }
+      if (c.operator === '>' || c.operator === '>=') {
+        higher = higherGT(gt, c, options)
+        if (higher === c && higher !== gt) {
+          return false
+        }
+      } else if (gt.operator === '>=' && !satisfies(gt.semver, String(c), options)) {
+        return false
+      }
+    }
+    if (lt) {
+      if (needDomLTPre) {
+        if (c.semver.prerelease && c.semver.prerelease.length &&
+            c.semver.major === needDomLTPre.major &&
+            c.semver.minor === needDomLTPre.minor &&
+            c.semver.patch === needDomLTPre.patch) {
+          needDomLTPre = false
+        }
+      }
+      if (c.operator === '<' || c.operator === '<=') {
+        lower = lowerLT(lt, c, options)
+        if (lower === c && lower !== lt) {
+          return false
+        }
+      } else if (lt.operator === '<=' && !satisfies(lt.semver, String(c), options)) {
+        return false
+      }
+    }
+    if (!c.operator && (lt || gt) && gtltComp !== 0) {
+      return false
+    }
+  }
+
+  // if there was a < or >, and nothing in the dom, then must be false
+  // UNLESS it was limited by another range in the other direction.
+  // Eg, >1.0.0 <1.0.1 is still a subset of <2.0.0
+  if (gt && hasDomLT && !lt && gtltComp !== 0) {
+    return false
+  }
+
+  if (lt && hasDomGT && !gt && gtltComp !== 0) {
+    return false
+  }
+
+  // we needed a prerelease range in a specific tuple, but didn't get one
+  // then this isn't a subset.  eg >=1.2.3-pre is not a subset of >=1.0.0,
+  // because it includes prereleases in the 1.2.3 tuple
+  if (needDomGTPre || needDomLTPre) {
+    return false
+  }
+
+  return true
 }
+
+// >=1.2.3 is lower than >1.2.3
+const higherGT = (a, b, options) => {
+  if (!a) {
+    return b
+  }
+  const comp = compare(a.semver, b.semver, options)
+  return comp > 0 ? a
+    : comp < 0 ? b
+    : b.operator === '>' && a.operator === '>=' ? b
+    : a
+}
+
+// <=1.2.3 is higher than <1.2.3
+const lowerLT = (a, b, options) => {
+  if (!a) {
+    return b
+  }
+  const comp = compare(a.semver, b.semver, options)
+  return comp < 0 ? a
+    : comp > 0 ? b
+    : b.operator === '<' && a.operator === '<=' ? b
+    : a
+}
+
+module.exports = subset
+
+
+/***/ }),
+
+/***/ 9194:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const Range = __nccwpck_require__(2594)
+
+// Mostly just for testing and legacy API reasons
+const toComparators = (range, options) =>
+  new Range(range, options).set
+    .map(comp => comp.map(c => c.value).join(' ').trim().split(' '))
+
+module.exports = toComparators
+
+
+/***/ }),
+
+/***/ 3097:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const Range = __nccwpck_require__(2594)
+const validRange = (range, options) => {
+  try {
+    // Return '*' instead of '' so that truthiness works.
+    // This will throw if it's invalid anyway
+    return new Range(range, options).range || '*'
+  } catch (er) {
+    return null
+  }
+}
+module.exports = validRange
 
 
 /***/ }),
@@ -17297,42 +18679,52 @@ if (process.platform === 'linux') {
 
 "use strict";
 
-var stripAnsi = __nccwpck_require__(7285);
-var codePointAt = __nccwpck_require__(717);
-var isFullwidthCodePoint = __nccwpck_require__(4600);
+const stripAnsi = __nccwpck_require__(7285);
+const isFullwidthCodePoint = __nccwpck_require__(4600);
+const emojiRegex = __nccwpck_require__(4166);
 
-// https://github.com/nodejs/io.js/blob/cff7300a578be1b10001f2d967aaedc88aee6402/lib/readline.js#L1345
-module.exports = function (str) {
-	if (typeof str !== 'string' || str.length === 0) {
+const stringWidth = string => {
+	if (typeof string !== 'string' || string.length === 0) {
 		return 0;
 	}
 
-	var width = 0;
+	string = stripAnsi(string);
 
-	str = stripAnsi(str);
+	if (string.length === 0) {
+		return 0;
+	}
 
-	for (var i = 0; i < str.length; i++) {
-		var code = codePointAt(str, i);
+	string = string.replace(emojiRegex(), '  ');
 
-		// ignore control characters
-		if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) {
+	let width = 0;
+
+	for (let i = 0; i < string.length; i++) {
+		const code = string.codePointAt(i);
+
+		// Ignore control characters
+		if (code <= 0x1F || (code >= 0x7F && code <= 0x9F)) {
 			continue;
 		}
 
-		// surrogates
-		if (code >= 0x10000) {
+		// Ignore combining characters
+		if (code >= 0x300 && code <= 0x36F) {
+			continue;
+		}
+
+		// Surrogates
+		if (code > 0xFFFF) {
 			i++;
 		}
 
-		if (isFullwidthCodePoint(code)) {
-			width += 2;
-		} else {
-			width++;
-		}
+		width += isFullwidthCodePoint(code) ? 2 : 1;
 	}
 
 	return width;
 };
+
+module.exports = stringWidth;
+// TODO: remove this in the next major version
+module.exports.default = stringWidth;
 
 
 /***/ }),
@@ -17645,11 +19037,9 @@ function simpleEnd(buf) {
 
 "use strict";
 
-var ansiRegex = __nccwpck_require__(4722)();
+const ansiRegex = __nccwpck_require__(4722);
 
-module.exports = function (str) {
-	return typeof str === 'string' ? str.replace(ansiRegex, '') : str;
-};
+module.exports = string => typeof string === 'string' ? string.replace(ansiRegex(), '') : string;
 
 
 /***/ }),
@@ -17671,7 +19061,7 @@ module.exports = __nccwpck_require__(3025);
 var net = __nccwpck_require__(1631);
 var tls = __nccwpck_require__(4016);
 var http = __nccwpck_require__(8605);
-var https = __nccwpck_require__(7211);
+var https = __nccwpck_require__(3034);
 var events = __nccwpck_require__(8614);
 var assert = __nccwpck_require__(2357);
 var util = __nccwpck_require__(1669);
@@ -18450,6 +19840,456 @@ function wrappy (fn, cb) {
 
 /***/ }),
 
+/***/ 8942:
+/***/ ((module) => {
+
+"use strict";
+
+module.exports = function (Yallist) {
+  Yallist.prototype[Symbol.iterator] = function* () {
+    for (let walker = this.head; walker; walker = walker.next) {
+      yield walker.value
+    }
+  }
+}
+
+
+/***/ }),
+
+/***/ 6028:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+module.exports = Yallist
+
+Yallist.Node = Node
+Yallist.create = Yallist
+
+function Yallist (list) {
+  var self = this
+  if (!(self instanceof Yallist)) {
+    self = new Yallist()
+  }
+
+  self.tail = null
+  self.head = null
+  self.length = 0
+
+  if (list && typeof list.forEach === 'function') {
+    list.forEach(function (item) {
+      self.push(item)
+    })
+  } else if (arguments.length > 0) {
+    for (var i = 0, l = arguments.length; i < l; i++) {
+      self.push(arguments[i])
+    }
+  }
+
+  return self
+}
+
+Yallist.prototype.removeNode = function (node) {
+  if (node.list !== this) {
+    throw new Error('removing node which does not belong to this list')
+  }
+
+  var next = node.next
+  var prev = node.prev
+
+  if (next) {
+    next.prev = prev
+  }
+
+  if (prev) {
+    prev.next = next
+  }
+
+  if (node === this.head) {
+    this.head = next
+  }
+  if (node === this.tail) {
+    this.tail = prev
+  }
+
+  node.list.length--
+  node.next = null
+  node.prev = null
+  node.list = null
+
+  return next
+}
+
+Yallist.prototype.unshiftNode = function (node) {
+  if (node === this.head) {
+    return
+  }
+
+  if (node.list) {
+    node.list.removeNode(node)
+  }
+
+  var head = this.head
+  node.list = this
+  node.next = head
+  if (head) {
+    head.prev = node
+  }
+
+  this.head = node
+  if (!this.tail) {
+    this.tail = node
+  }
+  this.length++
+}
+
+Yallist.prototype.pushNode = function (node) {
+  if (node === this.tail) {
+    return
+  }
+
+  if (node.list) {
+    node.list.removeNode(node)
+  }
+
+  var tail = this.tail
+  node.list = this
+  node.prev = tail
+  if (tail) {
+    tail.next = node
+  }
+
+  this.tail = node
+  if (!this.head) {
+    this.head = node
+  }
+  this.length++
+}
+
+Yallist.prototype.push = function () {
+  for (var i = 0, l = arguments.length; i < l; i++) {
+    push(this, arguments[i])
+  }
+  return this.length
+}
+
+Yallist.prototype.unshift = function () {
+  for (var i = 0, l = arguments.length; i < l; i++) {
+    unshift(this, arguments[i])
+  }
+  return this.length
+}
+
+Yallist.prototype.pop = function () {
+  if (!this.tail) {
+    return undefined
+  }
+
+  var res = this.tail.value
+  this.tail = this.tail.prev
+  if (this.tail) {
+    this.tail.next = null
+  } else {
+    this.head = null
+  }
+  this.length--
+  return res
+}
+
+Yallist.prototype.shift = function () {
+  if (!this.head) {
+    return undefined
+  }
+
+  var res = this.head.value
+  this.head = this.head.next
+  if (this.head) {
+    this.head.prev = null
+  } else {
+    this.tail = null
+  }
+  this.length--
+  return res
+}
+
+Yallist.prototype.forEach = function (fn, thisp) {
+  thisp = thisp || this
+  for (var walker = this.head, i = 0; walker !== null; i++) {
+    fn.call(thisp, walker.value, i, this)
+    walker = walker.next
+  }
+}
+
+Yallist.prototype.forEachReverse = function (fn, thisp) {
+  thisp = thisp || this
+  for (var walker = this.tail, i = this.length - 1; walker !== null; i--) {
+    fn.call(thisp, walker.value, i, this)
+    walker = walker.prev
+  }
+}
+
+Yallist.prototype.get = function (n) {
+  for (var i = 0, walker = this.head; walker !== null && i < n; i++) {
+    // abort out of the list early if we hit a cycle
+    walker = walker.next
+  }
+  if (i === n && walker !== null) {
+    return walker.value
+  }
+}
+
+Yallist.prototype.getReverse = function (n) {
+  for (var i = 0, walker = this.tail; walker !== null && i < n; i++) {
+    // abort out of the list early if we hit a cycle
+    walker = walker.prev
+  }
+  if (i === n && walker !== null) {
+    return walker.value
+  }
+}
+
+Yallist.prototype.map = function (fn, thisp) {
+  thisp = thisp || this
+  var res = new Yallist()
+  for (var walker = this.head; walker !== null;) {
+    res.push(fn.call(thisp, walker.value, this))
+    walker = walker.next
+  }
+  return res
+}
+
+Yallist.prototype.mapReverse = function (fn, thisp) {
+  thisp = thisp || this
+  var res = new Yallist()
+  for (var walker = this.tail; walker !== null;) {
+    res.push(fn.call(thisp, walker.value, this))
+    walker = walker.prev
+  }
+  return res
+}
+
+Yallist.prototype.reduce = function (fn, initial) {
+  var acc
+  var walker = this.head
+  if (arguments.length > 1) {
+    acc = initial
+  } else if (this.head) {
+    walker = this.head.next
+    acc = this.head.value
+  } else {
+    throw new TypeError('Reduce of empty list with no initial value')
+  }
+
+  for (var i = 0; walker !== null; i++) {
+    acc = fn(acc, walker.value, i)
+    walker = walker.next
+  }
+
+  return acc
+}
+
+Yallist.prototype.reduceReverse = function (fn, initial) {
+  var acc
+  var walker = this.tail
+  if (arguments.length > 1) {
+    acc = initial
+  } else if (this.tail) {
+    walker = this.tail.prev
+    acc = this.tail.value
+  } else {
+    throw new TypeError('Reduce of empty list with no initial value')
+  }
+
+  for (var i = this.length - 1; walker !== null; i--) {
+    acc = fn(acc, walker.value, i)
+    walker = walker.prev
+  }
+
+  return acc
+}
+
+Yallist.prototype.toArray = function () {
+  var arr = new Array(this.length)
+  for (var i = 0, walker = this.head; walker !== null; i++) {
+    arr[i] = walker.value
+    walker = walker.next
+  }
+  return arr
+}
+
+Yallist.prototype.toArrayReverse = function () {
+  var arr = new Array(this.length)
+  for (var i = 0, walker = this.tail; walker !== null; i++) {
+    arr[i] = walker.value
+    walker = walker.prev
+  }
+  return arr
+}
+
+Yallist.prototype.slice = function (from, to) {
+  to = to || this.length
+  if (to < 0) {
+    to += this.length
+  }
+  from = from || 0
+  if (from < 0) {
+    from += this.length
+  }
+  var ret = new Yallist()
+  if (to < from || to < 0) {
+    return ret
+  }
+  if (from < 0) {
+    from = 0
+  }
+  if (to > this.length) {
+    to = this.length
+  }
+  for (var i = 0, walker = this.head; walker !== null && i < from; i++) {
+    walker = walker.next
+  }
+  for (; walker !== null && i < to; i++, walker = walker.next) {
+    ret.push(walker.value)
+  }
+  return ret
+}
+
+Yallist.prototype.sliceReverse = function (from, to) {
+  to = to || this.length
+  if (to < 0) {
+    to += this.length
+  }
+  from = from || 0
+  if (from < 0) {
+    from += this.length
+  }
+  var ret = new Yallist()
+  if (to < from || to < 0) {
+    return ret
+  }
+  if (from < 0) {
+    from = 0
+  }
+  if (to > this.length) {
+    to = this.length
+  }
+  for (var i = this.length, walker = this.tail; walker !== null && i > to; i--) {
+    walker = walker.prev
+  }
+  for (; walker !== null && i > from; i--, walker = walker.prev) {
+    ret.push(walker.value)
+  }
+  return ret
+}
+
+Yallist.prototype.splice = function (start, deleteCount, ...nodes) {
+  if (start > this.length) {
+    start = this.length - 1
+  }
+  if (start < 0) {
+    start = this.length + start;
+  }
+
+  for (var i = 0, walker = this.head; walker !== null && i < start; i++) {
+    walker = walker.next
+  }
+
+  var ret = []
+  for (var i = 0; walker && i < deleteCount; i++) {
+    ret.push(walker.value)
+    walker = this.removeNode(walker)
+  }
+  if (walker === null) {
+    walker = this.tail
+  }
+
+  if (walker !== this.head && walker !== this.tail) {
+    walker = walker.prev
+  }
+
+  for (var i = 0; i < nodes.length; i++) {
+    walker = insert(this, walker, nodes[i])
+  }
+  return ret;
+}
+
+Yallist.prototype.reverse = function () {
+  var head = this.head
+  var tail = this.tail
+  for (var walker = head; walker !== null; walker = walker.prev) {
+    var p = walker.prev
+    walker.prev = walker.next
+    walker.next = p
+  }
+  this.head = tail
+  this.tail = head
+  return this
+}
+
+function insert (self, node, value) {
+  var inserted = node === self.head ?
+    new Node(value, null, node, self) :
+    new Node(value, node, node.next, self)
+
+  if (inserted.next === null) {
+    self.tail = inserted
+  }
+  if (inserted.prev === null) {
+    self.head = inserted
+  }
+
+  self.length++
+
+  return inserted
+}
+
+function push (self, item) {
+  self.tail = new Node(item, self.tail, null, self)
+  if (!self.head) {
+    self.head = self.tail
+  }
+  self.length++
+}
+
+function unshift (self, item) {
+  self.head = new Node(item, null, self.head, self)
+  if (!self.tail) {
+    self.tail = self.head
+  }
+  self.length++
+}
+
+function Node (value, prev, next, list) {
+  if (!(this instanceof Node)) {
+    return new Node(value, prev, next, list)
+  }
+
+  this.list = list
+  this.value = value
+
+  if (prev) {
+    prev.next = this
+    this.prev = prev
+  } else {
+    this.prev = null
+  }
+
+  if (next) {
+    next.prev = this
+    this.next = next
+  } else {
+    this.next = null
+  }
+}
+
+try {
+  // add if support for Symbol.iterator is present
+  __nccwpck_require__(8942)(Yallist)
+} catch (er) {}
+
+
+/***/ }),
+
 /***/ 3973:
 /***/ ((module, exports, __nccwpck_require__) => {
 
@@ -18484,11 +20324,11 @@ if (typeof require.context == 'function') {
 
 } else {
 
-    const binary = __nccwpck_require__(7796);
+    const binary = __nccwpck_require__(6016);
     const path = __nccwpck_require__(5622)
-    const binding_path = __nccwpck_require__.ab + "build/Release/node-v83-linux-x64/ziti_sdk_nodejs.node";
+    const binding_path = binary.find(__nccwpck_require__.ab + "package.json", {debug: false});
 
-    binding = __nccwpck_require__(5687);
+    binding = require(binding_path);
     
 }
 
@@ -18497,10 +20337,27 @@ var ziti = module.exports = exports = binding;
 
 /***/ }),
 
-/***/ 5687:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+/***/ 5197:
+/***/ ((module) => {
 
-module.exports = require(__nccwpck_require__.ab + "build/Release/node-v83-linux-x64/ziti_sdk_nodejs.node")
+module.exports = eval("require")("./internal/streams/BufferList");
+
+
+/***/ }),
+
+/***/ 1989:
+/***/ ((module) => {
+
+module.exports = eval("require")("aws-sdk");
+
+
+/***/ }),
+
+/***/ 8826:
+/***/ ((module) => {
+
+module.exports = eval("require")("core-util-is");
+
 
 /***/ }),
 
@@ -18512,19 +20369,59 @@ module.exports = eval("require")("encoding");
 
 /***/ }),
 
-/***/ 282:
+/***/ 8628:
 /***/ ((module) => {
 
-"use strict";
-module.exports = JSON.parse("{\"0.1.14\":{\"node_abi\":null,\"v8\":\"1.3\"},\"0.1.15\":{\"node_abi\":null,\"v8\":\"1.3\"},\"0.1.16\":{\"node_abi\":null,\"v8\":\"1.3\"},\"0.1.17\":{\"node_abi\":null,\"v8\":\"1.3\"},\"0.1.18\":{\"node_abi\":null,\"v8\":\"1.3\"},\"0.1.19\":{\"node_abi\":null,\"v8\":\"2.0\"},\"0.1.20\":{\"node_abi\":null,\"v8\":\"2.0\"},\"0.1.21\":{\"node_abi\":null,\"v8\":\"2.0\"},\"0.1.22\":{\"node_abi\":null,\"v8\":\"2.0\"},\"0.1.23\":{\"node_abi\":null,\"v8\":\"2.0\"},\"0.1.24\":{\"node_abi\":null,\"v8\":\"2.0\"},\"0.1.25\":{\"node_abi\":null,\"v8\":\"2.0\"},\"0.1.26\":{\"node_abi\":null,\"v8\":\"2.0\"},\"0.1.27\":{\"node_abi\":null,\"v8\":\"2.1\"},\"0.1.28\":{\"node_abi\":null,\"v8\":\"2.1\"},\"0.1.29\":{\"node_abi\":null,\"v8\":\"2.1\"},\"0.1.30\":{\"node_abi\":null,\"v8\":\"2.1\"},\"0.1.31\":{\"node_abi\":null,\"v8\":\"2.1\"},\"0.1.32\":{\"node_abi\":null,\"v8\":\"2.1\"},\"0.1.33\":{\"node_abi\":null,\"v8\":\"2.1\"},\"0.1.90\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.91\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.92\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.93\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.94\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.95\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.96\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.97\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.98\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.99\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.100\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.101\":{\"node_abi\":null,\"v8\":\"2.3\"},\"0.1.102\":{\"node_abi\":null,\"v8\":\"2.3\"},\"0.1.103\":{\"node_abi\":null,\"v8\":\"2.3\"},\"0.1.104\":{\"node_abi\":null,\"v8\":\"2.3\"},\"0.2.0\":{\"node_abi\":1,\"v8\":\"2.3\"},\"0.2.1\":{\"node_abi\":1,\"v8\":\"2.3\"},\"0.2.2\":{\"node_abi\":1,\"v8\":\"2.3\"},\"0.2.3\":{\"node_abi\":1,\"v8\":\"2.3\"},\"0.2.4\":{\"node_abi\":1,\"v8\":\"2.3\"},\"0.2.5\":{\"node_abi\":1,\"v8\":\"2.3\"},\"0.2.6\":{\"node_abi\":1,\"v8\":\"2.3\"},\"0.3.0\":{\"node_abi\":1,\"v8\":\"2.5\"},\"0.3.1\":{\"node_abi\":1,\"v8\":\"2.5\"},\"0.3.2\":{\"node_abi\":1,\"v8\":\"3.0\"},\"0.3.3\":{\"node_abi\":1,\"v8\":\"3.0\"},\"0.3.4\":{\"node_abi\":1,\"v8\":\"3.0\"},\"0.3.5\":{\"node_abi\":1,\"v8\":\"3.0\"},\"0.3.6\":{\"node_abi\":1,\"v8\":\"3.0\"},\"0.3.7\":{\"node_abi\":1,\"v8\":\"3.0\"},\"0.3.8\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.0\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.1\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.2\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.3\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.4\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.5\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.6\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.7\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.8\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.9\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.10\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.11\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.12\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.5.0\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.5.1\":{\"node_abi\":1,\"v8\":\"3.4\"},\"0.5.2\":{\"node_abi\":1,\"v8\":\"3.4\"},\"0.5.3\":{\"node_abi\":1,\"v8\":\"3.4\"},\"0.5.4\":{\"node_abi\":1,\"v8\":\"3.5\"},\"0.5.5\":{\"node_abi\":1,\"v8\":\"3.5\"},\"0.5.6\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.5.7\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.5.8\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.5.9\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.5.10\":{\"node_abi\":1,\"v8\":\"3.7\"},\"0.6.0\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.1\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.2\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.3\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.4\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.5\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.6\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.7\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.8\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.9\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.10\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.11\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.12\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.13\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.14\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.15\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.16\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.17\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.18\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.19\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.20\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.21\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.7.0\":{\"node_abi\":1,\"v8\":\"3.8\"},\"0.7.1\":{\"node_abi\":1,\"v8\":\"3.8\"},\"0.7.2\":{\"node_abi\":1,\"v8\":\"3.8\"},\"0.7.3\":{\"node_abi\":1,\"v8\":\"3.9\"},\"0.7.4\":{\"node_abi\":1,\"v8\":\"3.9\"},\"0.7.5\":{\"node_abi\":1,\"v8\":\"3.9\"},\"0.7.6\":{\"node_abi\":1,\"v8\":\"3.9\"},\"0.7.7\":{\"node_abi\":1,\"v8\":\"3.9\"},\"0.7.8\":{\"node_abi\":1,\"v8\":\"3.9\"},\"0.7.9\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.7.10\":{\"node_abi\":1,\"v8\":\"3.9\"},\"0.7.11\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.7.12\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.0\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.1\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.2\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.3\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.4\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.5\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.6\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.7\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.8\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.9\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.10\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.11\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.12\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.13\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.14\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.15\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.16\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.17\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.18\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.19\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.20\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.21\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.22\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.23\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.24\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.25\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.26\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.27\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.28\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.9.0\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.9.1\":{\"node_abi\":10,\"v8\":\"3.11\"},\"0.9.2\":{\"node_abi\":10,\"v8\":\"3.11\"},\"0.9.3\":{\"node_abi\":10,\"v8\":\"3.13\"},\"0.9.4\":{\"node_abi\":10,\"v8\":\"3.13\"},\"0.9.5\":{\"node_abi\":10,\"v8\":\"3.13\"},\"0.9.6\":{\"node_abi\":10,\"v8\":\"3.15\"},\"0.9.7\":{\"node_abi\":10,\"v8\":\"3.15\"},\"0.9.8\":{\"node_abi\":10,\"v8\":\"3.15\"},\"0.9.9\":{\"node_abi\":11,\"v8\":\"3.15\"},\"0.9.10\":{\"node_abi\":11,\"v8\":\"3.15\"},\"0.9.11\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.9.12\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.0\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.1\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.2\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.3\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.4\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.5\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.6\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.7\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.8\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.9\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.10\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.11\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.12\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.13\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.14\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.15\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.16\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.17\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.18\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.19\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.20\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.21\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.22\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.23\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.24\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.25\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.26\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.27\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.28\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.29\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.30\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.31\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.32\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.33\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.34\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.35\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.36\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.37\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.38\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.39\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.40\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.41\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.42\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.43\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.44\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.45\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.46\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.47\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.48\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.11.0\":{\"node_abi\":12,\"v8\":\"3.17\"},\"0.11.1\":{\"node_abi\":12,\"v8\":\"3.18\"},\"0.11.2\":{\"node_abi\":12,\"v8\":\"3.19\"},\"0.11.3\":{\"node_abi\":12,\"v8\":\"3.19\"},\"0.11.4\":{\"node_abi\":12,\"v8\":\"3.20\"},\"0.11.5\":{\"node_abi\":12,\"v8\":\"3.20\"},\"0.11.6\":{\"node_abi\":12,\"v8\":\"3.20\"},\"0.11.7\":{\"node_abi\":12,\"v8\":\"3.20\"},\"0.11.8\":{\"node_abi\":13,\"v8\":\"3.21\"},\"0.11.9\":{\"node_abi\":13,\"v8\":\"3.22\"},\"0.11.10\":{\"node_abi\":13,\"v8\":\"3.22\"},\"0.11.11\":{\"node_abi\":14,\"v8\":\"3.22\"},\"0.11.12\":{\"node_abi\":14,\"v8\":\"3.22\"},\"0.11.13\":{\"node_abi\":14,\"v8\":\"3.25\"},\"0.11.14\":{\"node_abi\":14,\"v8\":\"3.26\"},\"0.11.15\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.11.16\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.0\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.1\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.2\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.3\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.4\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.5\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.6\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.7\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.8\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.9\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.10\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.11\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.12\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.13\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.14\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.15\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.16\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.17\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.18\":{\"node_abi\":14,\"v8\":\"3.28\"},\"1.0.0\":{\"node_abi\":42,\"v8\":\"3.31\"},\"1.0.1\":{\"node_abi\":42,\"v8\":\"3.31\"},\"1.0.2\":{\"node_abi\":42,\"v8\":\"3.31\"},\"1.0.3\":{\"node_abi\":42,\"v8\":\"4.1\"},\"1.0.4\":{\"node_abi\":42,\"v8\":\"4.1\"},\"1.1.0\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.2.0\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.3.0\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.4.1\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.4.2\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.4.3\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.5.0\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.5.1\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.6.0\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.6.1\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.6.2\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.6.3\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.6.4\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.7.1\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.8.1\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.8.2\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.8.3\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.8.4\":{\"node_abi\":43,\"v8\":\"4.1\"},\"2.0.0\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.0.1\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.0.2\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.1.0\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.2.0\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.2.1\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.3.0\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.3.1\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.3.2\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.3.3\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.3.4\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.4.0\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.5.0\":{\"node_abi\":44,\"v8\":\"4.2\"},\"3.0.0\":{\"node_abi\":45,\"v8\":\"4.4\"},\"3.1.0\":{\"node_abi\":45,\"v8\":\"4.4\"},\"3.2.0\":{\"node_abi\":45,\"v8\":\"4.4\"},\"3.3.0\":{\"node_abi\":45,\"v8\":\"4.4\"},\"3.3.1\":{\"node_abi\":45,\"v8\":\"4.4\"},\"4.0.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.1.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.1.1\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.1.2\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.2.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.2.1\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.2.2\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.2.3\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.2.4\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.2.5\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.2.6\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.3.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.3.1\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.3.2\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.4.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.4.1\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.4.2\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.4.3\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.4.4\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.4.5\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.4.6\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.4.7\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.5.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.6.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.6.1\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.6.2\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.7.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.7.1\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.7.2\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.7.3\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.8.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.8.1\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.8.2\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.8.3\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.8.4\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.8.5\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.8.6\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.8.7\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.9.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.9.1\":{\"node_abi\":46,\"v8\":\"4.5\"},\"5.0.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.1.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.1.1\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.2.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.3.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.4.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.4.1\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.5.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.6.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.7.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.7.1\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.8.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.9.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.9.1\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.10.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.10.1\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.11.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.11.1\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.12.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"6.0.0\":{\"node_abi\":48,\"v8\":\"5.0\"},\"6.1.0\":{\"node_abi\":48,\"v8\":\"5.0\"},\"6.2.0\":{\"node_abi\":48,\"v8\":\"5.0\"},\"6.2.1\":{\"node_abi\":48,\"v8\":\"5.0\"},\"6.2.2\":{\"node_abi\":48,\"v8\":\"5.0\"},\"6.3.0\":{\"node_abi\":48,\"v8\":\"5.0\"},\"6.3.1\":{\"node_abi\":48,\"v8\":\"5.0\"},\"6.4.0\":{\"node_abi\":48,\"v8\":\"5.0\"},\"6.5.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.6.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.7.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.8.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.8.1\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.9.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.9.1\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.9.2\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.9.3\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.9.4\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.9.5\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.10.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.10.1\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.10.2\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.10.3\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.11.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.11.1\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.11.2\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.11.3\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.11.4\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.11.5\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.12.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.12.1\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.12.2\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.12.3\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.13.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.13.1\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.14.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.14.1\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.14.2\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.14.3\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.14.4\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.15.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.15.1\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.16.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.17.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.17.1\":{\"node_abi\":48,\"v8\":\"5.1\"},\"7.0.0\":{\"node_abi\":51,\"v8\":\"5.4\"},\"7.1.0\":{\"node_abi\":51,\"v8\":\"5.4\"},\"7.2.0\":{\"node_abi\":51,\"v8\":\"5.4\"},\"7.2.1\":{\"node_abi\":51,\"v8\":\"5.4\"},\"7.3.0\":{\"node_abi\":51,\"v8\":\"5.4\"},\"7.4.0\":{\"node_abi\":51,\"v8\":\"5.4\"},\"7.5.0\":{\"node_abi\":51,\"v8\":\"5.4\"},\"7.6.0\":{\"node_abi\":51,\"v8\":\"5.5\"},\"7.7.0\":{\"node_abi\":51,\"v8\":\"5.5\"},\"7.7.1\":{\"node_abi\":51,\"v8\":\"5.5\"},\"7.7.2\":{\"node_abi\":51,\"v8\":\"5.5\"},\"7.7.3\":{\"node_abi\":51,\"v8\":\"5.5\"},\"7.7.4\":{\"node_abi\":51,\"v8\":\"5.5\"},\"7.8.0\":{\"node_abi\":51,\"v8\":\"5.5\"},\"7.9.0\":{\"node_abi\":51,\"v8\":\"5.5\"},\"7.10.0\":{\"node_abi\":51,\"v8\":\"5.5\"},\"7.10.1\":{\"node_abi\":51,\"v8\":\"5.5\"},\"8.0.0\":{\"node_abi\":57,\"v8\":\"5.8\"},\"8.1.0\":{\"node_abi\":57,\"v8\":\"5.8\"},\"8.1.1\":{\"node_abi\":57,\"v8\":\"5.8\"},\"8.1.2\":{\"node_abi\":57,\"v8\":\"5.8\"},\"8.1.3\":{\"node_abi\":57,\"v8\":\"5.8\"},\"8.1.4\":{\"node_abi\":57,\"v8\":\"5.8\"},\"8.2.0\":{\"node_abi\":57,\"v8\":\"5.8\"},\"8.2.1\":{\"node_abi\":57,\"v8\":\"5.8\"},\"8.3.0\":{\"node_abi\":57,\"v8\":\"6.0\"},\"8.4.0\":{\"node_abi\":57,\"v8\":\"6.0\"},\"8.5.0\":{\"node_abi\":57,\"v8\":\"6.0\"},\"8.6.0\":{\"node_abi\":57,\"v8\":\"6.0\"},\"8.7.0\":{\"node_abi\":57,\"v8\":\"6.1\"},\"8.8.0\":{\"node_abi\":57,\"v8\":\"6.1\"},\"8.8.1\":{\"node_abi\":57,\"v8\":\"6.1\"},\"8.9.0\":{\"node_abi\":57,\"v8\":\"6.1\"},\"8.9.1\":{\"node_abi\":57,\"v8\":\"6.1\"},\"8.9.2\":{\"node_abi\":57,\"v8\":\"6.1\"},\"8.9.3\":{\"node_abi\":57,\"v8\":\"6.1\"},\"8.9.4\":{\"node_abi\":57,\"v8\":\"6.1\"},\"8.10.0\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.11.0\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.11.1\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.11.2\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.11.3\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.11.4\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.12.0\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.13.0\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.14.0\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.14.1\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.15.0\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.15.1\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.16.0\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.16.1\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.16.2\":{\"node_abi\":57,\"v8\":\"6.2\"},\"9.0.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.1.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.2.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.2.1\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.3.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.4.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.5.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.6.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.6.1\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.7.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.7.1\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.8.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.9.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.10.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.10.1\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.11.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.11.1\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.11.2\":{\"node_abi\":59,\"v8\":\"6.2\"},\"10.0.0\":{\"node_abi\":64,\"v8\":\"6.6\"},\"10.1.0\":{\"node_abi\":64,\"v8\":\"6.6\"},\"10.2.0\":{\"node_abi\":64,\"v8\":\"6.6\"},\"10.2.1\":{\"node_abi\":64,\"v8\":\"6.6\"},\"10.3.0\":{\"node_abi\":64,\"v8\":\"6.6\"},\"10.4.0\":{\"node_abi\":64,\"v8\":\"6.7\"},\"10.4.1\":{\"node_abi\":64,\"v8\":\"6.7\"},\"10.5.0\":{\"node_abi\":64,\"v8\":\"6.7\"},\"10.6.0\":{\"node_abi\":64,\"v8\":\"6.7\"},\"10.7.0\":{\"node_abi\":64,\"v8\":\"6.7\"},\"10.8.0\":{\"node_abi\":64,\"v8\":\"6.7\"},\"10.9.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.10.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.11.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.12.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.13.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.14.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.14.1\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.14.2\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.15.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.15.1\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.15.2\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.15.3\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.16.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.16.1\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.16.2\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.16.3\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.17.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"11.0.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.1.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.2.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.3.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.4.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.5.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.6.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.7.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.8.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.9.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.10.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.10.1\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.11.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.12.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.13.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.14.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.15.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"12.0.0\":{\"node_abi\":72,\"v8\":\"7.4\"},\"12.1.0\":{\"node_abi\":72,\"v8\":\"7.4\"},\"12.2.0\":{\"node_abi\":72,\"v8\":\"7.4\"},\"12.3.0\":{\"node_abi\":72,\"v8\":\"7.4\"},\"12.3.1\":{\"node_abi\":72,\"v8\":\"7.4\"},\"12.4.0\":{\"node_abi\":72,\"v8\":\"7.4\"},\"12.5.0\":{\"node_abi\":72,\"v8\":\"7.5\"},\"12.6.0\":{\"node_abi\":72,\"v8\":\"7.5\"},\"12.7.0\":{\"node_abi\":72,\"v8\":\"7.5\"},\"12.8.0\":{\"node_abi\":72,\"v8\":\"7.5\"},\"12.8.1\":{\"node_abi\":72,\"v8\":\"7.5\"},\"12.9.0\":{\"node_abi\":72,\"v8\":\"7.6\"},\"12.9.1\":{\"node_abi\":72,\"v8\":\"7.6\"},\"12.10.0\":{\"node_abi\":72,\"v8\":\"7.6\"},\"12.11.0\":{\"node_abi\":72,\"v8\":\"7.7\"},\"12.11.1\":{\"node_abi\":72,\"v8\":\"7.7\"},\"12.12.0\":{\"node_abi\":72,\"v8\":\"7.7\"},\"12.13.0\":{\"node_abi\":72,\"v8\":\"7.7\"},\"13.0.0\":{\"node_abi\":79,\"v8\":\"7.8\"},\"13.0.1\":{\"node_abi\":79,\"v8\":\"7.8\"}}");
+module.exports = eval("require")("isarray");
+
 
 /***/ }),
 
-/***/ 6398:
+/***/ 3241:
+/***/ ((module) => {
+
+module.exports = eval("require")("mock-aws-s3");
+
+
+/***/ }),
+
+/***/ 9316:
+/***/ ((module) => {
+
+module.exports = eval("require")("nock");
+
+
+/***/ }),
+
+/***/ 275:
+/***/ ((module) => {
+
+module.exports = eval("require")("osenv");
+
+
+/***/ }),
+
+/***/ 6808:
+/***/ ((module) => {
+
+module.exports = eval("require")("process-nextick-args");
+
+
+/***/ }),
+
+/***/ 1427:
 /***/ ((module) => {
 
 "use strict";
-module.exports = JSON.parse("{\"_args\":[[\"node-pre-gyp@0.14.0\",\"/home/kbingham/Sites/netfoundry/github/ziti-webhook-action\"]],\"_from\":\"node-pre-gyp@0.14.0\",\"_id\":\"node-pre-gyp@0.14.0\",\"_inBundle\":false,\"_integrity\":\"sha512-+CvDC7ZttU/sSt9rFjix/P05iS43qHCOOGzcr3Ry99bXG7VX953+vFyEuph/tfqoYu8dttBkE86JSKBO2OzcxA==\",\"_location\":\"/node-pre-gyp\",\"_phantomChildren\":{},\"_requested\":{\"type\":\"version\",\"registry\":true,\"raw\":\"node-pre-gyp@0.14.0\",\"name\":\"node-pre-gyp\",\"escapedName\":\"node-pre-gyp\",\"rawSpec\":\"0.14.0\",\"saveSpec\":null,\"fetchSpec\":\"0.14.0\"},\"_requiredBy\":[\"/ziti-sdk-nodejs\"],\"_resolved\":\"https://registry.npmjs.org/node-pre-gyp/-/node-pre-gyp-0.14.0.tgz\",\"_spec\":\"0.14.0\",\"_where\":\"/home/kbingham/Sites/netfoundry/github/ziti-webhook-action\",\"author\":{\"name\":\"Dane Springmeyer\",\"email\":\"dane@mapbox.com\"},\"bin\":{\"node-pre-gyp\":\"bin/node-pre-gyp\"},\"bugs\":{\"url\":\"https://github.com/mapbox/node-pre-gyp/issues\"},\"dependencies\":{\"detect-libc\":\"^1.0.2\",\"mkdirp\":\"^0.5.1\",\"needle\":\"^2.2.1\",\"nopt\":\"^4.0.1\",\"npm-packlist\":\"^1.1.6\",\"npmlog\":\"^4.0.2\",\"rc\":\"^1.2.7\",\"rimraf\":\"^2.6.1\",\"semver\":\"^5.3.0\",\"tar\":\"^4.4.2\"},\"description\":\"Node.js native addon binary install tool\",\"devDependencies\":{\"aws-sdk\":\"^2.28.0\",\"jshint\":\"^2.9.5\",\"nock\":\"^9.2.3\",\"tape\":\"^4.6.3\"},\"homepage\":\"https://github.com/mapbox/node-pre-gyp#readme\",\"jshintConfig\":{\"node\":true,\"globalstrict\":true,\"undef\":true,\"unused\":false,\"noarg\":true},\"keywords\":[\"native\",\"addon\",\"module\",\"c\",\"c++\",\"bindings\",\"binary\"],\"license\":\"BSD-3-Clause\",\"main\":\"./lib/node-pre-gyp.js\",\"name\":\"node-pre-gyp\",\"repository\":{\"type\":\"git\",\"url\":\"git://github.com/mapbox/node-pre-gyp.git\"},\"scripts\":{\"pretest\":\"jshint test/build.test.js test/s3_setup.test.js test/versioning.test.js test/fetch.test.js lib lib/util scripts bin/node-pre-gyp\",\"test\":\"jshint lib lib/util scripts bin/node-pre-gyp && tape test/*test.js\",\"update-crosswalk\":\"node scripts/abi_crosswalk.js\"},\"version\":\"0.14.0\"}");
+module.exports = JSON.parse("{\"0.1.14\":{\"node_abi\":null,\"v8\":\"1.3\"},\"0.1.15\":{\"node_abi\":null,\"v8\":\"1.3\"},\"0.1.16\":{\"node_abi\":null,\"v8\":\"1.3\"},\"0.1.17\":{\"node_abi\":null,\"v8\":\"1.3\"},\"0.1.18\":{\"node_abi\":null,\"v8\":\"1.3\"},\"0.1.19\":{\"node_abi\":null,\"v8\":\"2.0\"},\"0.1.20\":{\"node_abi\":null,\"v8\":\"2.0\"},\"0.1.21\":{\"node_abi\":null,\"v8\":\"2.0\"},\"0.1.22\":{\"node_abi\":null,\"v8\":\"2.0\"},\"0.1.23\":{\"node_abi\":null,\"v8\":\"2.0\"},\"0.1.24\":{\"node_abi\":null,\"v8\":\"2.0\"},\"0.1.25\":{\"node_abi\":null,\"v8\":\"2.0\"},\"0.1.26\":{\"node_abi\":null,\"v8\":\"2.0\"},\"0.1.27\":{\"node_abi\":null,\"v8\":\"2.1\"},\"0.1.28\":{\"node_abi\":null,\"v8\":\"2.1\"},\"0.1.29\":{\"node_abi\":null,\"v8\":\"2.1\"},\"0.1.30\":{\"node_abi\":null,\"v8\":\"2.1\"},\"0.1.31\":{\"node_abi\":null,\"v8\":\"2.1\"},\"0.1.32\":{\"node_abi\":null,\"v8\":\"2.1\"},\"0.1.33\":{\"node_abi\":null,\"v8\":\"2.1\"},\"0.1.90\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.91\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.92\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.93\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.94\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.95\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.96\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.97\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.98\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.99\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.100\":{\"node_abi\":null,\"v8\":\"2.2\"},\"0.1.101\":{\"node_abi\":null,\"v8\":\"2.3\"},\"0.1.102\":{\"node_abi\":null,\"v8\":\"2.3\"},\"0.1.103\":{\"node_abi\":null,\"v8\":\"2.3\"},\"0.1.104\":{\"node_abi\":null,\"v8\":\"2.3\"},\"0.2.0\":{\"node_abi\":1,\"v8\":\"2.3\"},\"0.2.1\":{\"node_abi\":1,\"v8\":\"2.3\"},\"0.2.2\":{\"node_abi\":1,\"v8\":\"2.3\"},\"0.2.3\":{\"node_abi\":1,\"v8\":\"2.3\"},\"0.2.4\":{\"node_abi\":1,\"v8\":\"2.3\"},\"0.2.5\":{\"node_abi\":1,\"v8\":\"2.3\"},\"0.2.6\":{\"node_abi\":1,\"v8\":\"2.3\"},\"0.3.0\":{\"node_abi\":1,\"v8\":\"2.5\"},\"0.3.1\":{\"node_abi\":1,\"v8\":\"2.5\"},\"0.3.2\":{\"node_abi\":1,\"v8\":\"3.0\"},\"0.3.3\":{\"node_abi\":1,\"v8\":\"3.0\"},\"0.3.4\":{\"node_abi\":1,\"v8\":\"3.0\"},\"0.3.5\":{\"node_abi\":1,\"v8\":\"3.0\"},\"0.3.6\":{\"node_abi\":1,\"v8\":\"3.0\"},\"0.3.7\":{\"node_abi\":1,\"v8\":\"3.0\"},\"0.3.8\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.0\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.1\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.2\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.3\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.4\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.5\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.6\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.7\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.8\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.9\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.10\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.11\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.4.12\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.5.0\":{\"node_abi\":1,\"v8\":\"3.1\"},\"0.5.1\":{\"node_abi\":1,\"v8\":\"3.4\"},\"0.5.2\":{\"node_abi\":1,\"v8\":\"3.4\"},\"0.5.3\":{\"node_abi\":1,\"v8\":\"3.4\"},\"0.5.4\":{\"node_abi\":1,\"v8\":\"3.5\"},\"0.5.5\":{\"node_abi\":1,\"v8\":\"3.5\"},\"0.5.6\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.5.7\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.5.8\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.5.9\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.5.10\":{\"node_abi\":1,\"v8\":\"3.7\"},\"0.6.0\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.1\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.2\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.3\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.4\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.5\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.6\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.7\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.8\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.9\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.10\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.11\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.12\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.13\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.14\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.15\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.16\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.17\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.18\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.19\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.20\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.6.21\":{\"node_abi\":1,\"v8\":\"3.6\"},\"0.7.0\":{\"node_abi\":1,\"v8\":\"3.8\"},\"0.7.1\":{\"node_abi\":1,\"v8\":\"3.8\"},\"0.7.2\":{\"node_abi\":1,\"v8\":\"3.8\"},\"0.7.3\":{\"node_abi\":1,\"v8\":\"3.9\"},\"0.7.4\":{\"node_abi\":1,\"v8\":\"3.9\"},\"0.7.5\":{\"node_abi\":1,\"v8\":\"3.9\"},\"0.7.6\":{\"node_abi\":1,\"v8\":\"3.9\"},\"0.7.7\":{\"node_abi\":1,\"v8\":\"3.9\"},\"0.7.8\":{\"node_abi\":1,\"v8\":\"3.9\"},\"0.7.9\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.7.10\":{\"node_abi\":1,\"v8\":\"3.9\"},\"0.7.11\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.7.12\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.0\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.1\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.2\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.3\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.4\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.5\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.6\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.7\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.8\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.9\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.10\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.11\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.12\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.13\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.14\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.15\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.16\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.17\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.18\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.19\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.20\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.21\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.22\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.23\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.24\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.25\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.26\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.27\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.8.28\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.9.0\":{\"node_abi\":1,\"v8\":\"3.11\"},\"0.9.1\":{\"node_abi\":10,\"v8\":\"3.11\"},\"0.9.2\":{\"node_abi\":10,\"v8\":\"3.11\"},\"0.9.3\":{\"node_abi\":10,\"v8\":\"3.13\"},\"0.9.4\":{\"node_abi\":10,\"v8\":\"3.13\"},\"0.9.5\":{\"node_abi\":10,\"v8\":\"3.13\"},\"0.9.6\":{\"node_abi\":10,\"v8\":\"3.15\"},\"0.9.7\":{\"node_abi\":10,\"v8\":\"3.15\"},\"0.9.8\":{\"node_abi\":10,\"v8\":\"3.15\"},\"0.9.9\":{\"node_abi\":11,\"v8\":\"3.15\"},\"0.9.10\":{\"node_abi\":11,\"v8\":\"3.15\"},\"0.9.11\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.9.12\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.0\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.1\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.2\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.3\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.4\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.5\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.6\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.7\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.8\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.9\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.10\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.11\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.12\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.13\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.14\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.15\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.16\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.17\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.18\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.19\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.20\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.21\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.22\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.23\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.24\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.25\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.26\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.27\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.28\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.29\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.30\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.31\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.32\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.33\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.34\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.35\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.36\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.37\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.38\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.39\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.40\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.41\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.42\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.43\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.44\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.45\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.46\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.47\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.10.48\":{\"node_abi\":11,\"v8\":\"3.14\"},\"0.11.0\":{\"node_abi\":12,\"v8\":\"3.17\"},\"0.11.1\":{\"node_abi\":12,\"v8\":\"3.18\"},\"0.11.2\":{\"node_abi\":12,\"v8\":\"3.19\"},\"0.11.3\":{\"node_abi\":12,\"v8\":\"3.19\"},\"0.11.4\":{\"node_abi\":12,\"v8\":\"3.20\"},\"0.11.5\":{\"node_abi\":12,\"v8\":\"3.20\"},\"0.11.6\":{\"node_abi\":12,\"v8\":\"3.20\"},\"0.11.7\":{\"node_abi\":12,\"v8\":\"3.20\"},\"0.11.8\":{\"node_abi\":13,\"v8\":\"3.21\"},\"0.11.9\":{\"node_abi\":13,\"v8\":\"3.22\"},\"0.11.10\":{\"node_abi\":13,\"v8\":\"3.22\"},\"0.11.11\":{\"node_abi\":14,\"v8\":\"3.22\"},\"0.11.12\":{\"node_abi\":14,\"v8\":\"3.22\"},\"0.11.13\":{\"node_abi\":14,\"v8\":\"3.25\"},\"0.11.14\":{\"node_abi\":14,\"v8\":\"3.26\"},\"0.11.15\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.11.16\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.0\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.1\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.2\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.3\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.4\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.5\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.6\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.7\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.8\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.9\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.10\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.11\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.12\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.13\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.14\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.15\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.16\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.17\":{\"node_abi\":14,\"v8\":\"3.28\"},\"0.12.18\":{\"node_abi\":14,\"v8\":\"3.28\"},\"1.0.0\":{\"node_abi\":42,\"v8\":\"3.31\"},\"1.0.1\":{\"node_abi\":42,\"v8\":\"3.31\"},\"1.0.2\":{\"node_abi\":42,\"v8\":\"3.31\"},\"1.0.3\":{\"node_abi\":42,\"v8\":\"4.1\"},\"1.0.4\":{\"node_abi\":42,\"v8\":\"4.1\"},\"1.1.0\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.2.0\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.3.0\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.4.1\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.4.2\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.4.3\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.5.0\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.5.1\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.6.0\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.6.1\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.6.2\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.6.3\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.6.4\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.7.1\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.8.1\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.8.2\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.8.3\":{\"node_abi\":43,\"v8\":\"4.1\"},\"1.8.4\":{\"node_abi\":43,\"v8\":\"4.1\"},\"2.0.0\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.0.1\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.0.2\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.1.0\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.2.0\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.2.1\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.3.0\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.3.1\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.3.2\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.3.3\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.3.4\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.4.0\":{\"node_abi\":44,\"v8\":\"4.2\"},\"2.5.0\":{\"node_abi\":44,\"v8\":\"4.2\"},\"3.0.0\":{\"node_abi\":45,\"v8\":\"4.4\"},\"3.1.0\":{\"node_abi\":45,\"v8\":\"4.4\"},\"3.2.0\":{\"node_abi\":45,\"v8\":\"4.4\"},\"3.3.0\":{\"node_abi\":45,\"v8\":\"4.4\"},\"3.3.1\":{\"node_abi\":45,\"v8\":\"4.4\"},\"4.0.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.1.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.1.1\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.1.2\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.2.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.2.1\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.2.2\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.2.3\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.2.4\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.2.5\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.2.6\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.3.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.3.1\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.3.2\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.4.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.4.1\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.4.2\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.4.3\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.4.4\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.4.5\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.4.6\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.4.7\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.5.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.6.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.6.1\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.6.2\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.7.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.7.1\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.7.2\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.7.3\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.8.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.8.1\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.8.2\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.8.3\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.8.4\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.8.5\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.8.6\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.8.7\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.9.0\":{\"node_abi\":46,\"v8\":\"4.5\"},\"4.9.1\":{\"node_abi\":46,\"v8\":\"4.5\"},\"5.0.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.1.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.1.1\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.2.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.3.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.4.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.4.1\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.5.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.6.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.7.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.7.1\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.8.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.9.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.9.1\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.10.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.10.1\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.11.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.11.1\":{\"node_abi\":47,\"v8\":\"4.6\"},\"5.12.0\":{\"node_abi\":47,\"v8\":\"4.6\"},\"6.0.0\":{\"node_abi\":48,\"v8\":\"5.0\"},\"6.1.0\":{\"node_abi\":48,\"v8\":\"5.0\"},\"6.2.0\":{\"node_abi\":48,\"v8\":\"5.0\"},\"6.2.1\":{\"node_abi\":48,\"v8\":\"5.0\"},\"6.2.2\":{\"node_abi\":48,\"v8\":\"5.0\"},\"6.3.0\":{\"node_abi\":48,\"v8\":\"5.0\"},\"6.3.1\":{\"node_abi\":48,\"v8\":\"5.0\"},\"6.4.0\":{\"node_abi\":48,\"v8\":\"5.0\"},\"6.5.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.6.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.7.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.8.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.8.1\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.9.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.9.1\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.9.2\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.9.3\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.9.4\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.9.5\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.10.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.10.1\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.10.2\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.10.3\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.11.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.11.1\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.11.2\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.11.3\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.11.4\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.11.5\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.12.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.12.1\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.12.2\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.12.3\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.13.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.13.1\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.14.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.14.1\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.14.2\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.14.3\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.14.4\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.15.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.15.1\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.16.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.17.0\":{\"node_abi\":48,\"v8\":\"5.1\"},\"6.17.1\":{\"node_abi\":48,\"v8\":\"5.1\"},\"7.0.0\":{\"node_abi\":51,\"v8\":\"5.4\"},\"7.1.0\":{\"node_abi\":51,\"v8\":\"5.4\"},\"7.2.0\":{\"node_abi\":51,\"v8\":\"5.4\"},\"7.2.1\":{\"node_abi\":51,\"v8\":\"5.4\"},\"7.3.0\":{\"node_abi\":51,\"v8\":\"5.4\"},\"7.4.0\":{\"node_abi\":51,\"v8\":\"5.4\"},\"7.5.0\":{\"node_abi\":51,\"v8\":\"5.4\"},\"7.6.0\":{\"node_abi\":51,\"v8\":\"5.5\"},\"7.7.0\":{\"node_abi\":51,\"v8\":\"5.5\"},\"7.7.1\":{\"node_abi\":51,\"v8\":\"5.5\"},\"7.7.2\":{\"node_abi\":51,\"v8\":\"5.5\"},\"7.7.3\":{\"node_abi\":51,\"v8\":\"5.5\"},\"7.7.4\":{\"node_abi\":51,\"v8\":\"5.5\"},\"7.8.0\":{\"node_abi\":51,\"v8\":\"5.5\"},\"7.9.0\":{\"node_abi\":51,\"v8\":\"5.5\"},\"7.10.0\":{\"node_abi\":51,\"v8\":\"5.5\"},\"7.10.1\":{\"node_abi\":51,\"v8\":\"5.5\"},\"8.0.0\":{\"node_abi\":57,\"v8\":\"5.8\"},\"8.1.0\":{\"node_abi\":57,\"v8\":\"5.8\"},\"8.1.1\":{\"node_abi\":57,\"v8\":\"5.8\"},\"8.1.2\":{\"node_abi\":57,\"v8\":\"5.8\"},\"8.1.3\":{\"node_abi\":57,\"v8\":\"5.8\"},\"8.1.4\":{\"node_abi\":57,\"v8\":\"5.8\"},\"8.2.0\":{\"node_abi\":57,\"v8\":\"5.8\"},\"8.2.1\":{\"node_abi\":57,\"v8\":\"5.8\"},\"8.3.0\":{\"node_abi\":57,\"v8\":\"6.0\"},\"8.4.0\":{\"node_abi\":57,\"v8\":\"6.0\"},\"8.5.0\":{\"node_abi\":57,\"v8\":\"6.0\"},\"8.6.0\":{\"node_abi\":57,\"v8\":\"6.0\"},\"8.7.0\":{\"node_abi\":57,\"v8\":\"6.1\"},\"8.8.0\":{\"node_abi\":57,\"v8\":\"6.1\"},\"8.8.1\":{\"node_abi\":57,\"v8\":\"6.1\"},\"8.9.0\":{\"node_abi\":57,\"v8\":\"6.1\"},\"8.9.1\":{\"node_abi\":57,\"v8\":\"6.1\"},\"8.9.2\":{\"node_abi\":57,\"v8\":\"6.1\"},\"8.9.3\":{\"node_abi\":57,\"v8\":\"6.1\"},\"8.9.4\":{\"node_abi\":57,\"v8\":\"6.1\"},\"8.10.0\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.11.0\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.11.1\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.11.2\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.11.3\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.11.4\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.12.0\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.13.0\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.14.0\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.14.1\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.15.0\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.15.1\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.16.0\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.16.1\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.16.2\":{\"node_abi\":57,\"v8\":\"6.2\"},\"8.17.0\":{\"node_abi\":57,\"v8\":\"6.2\"},\"9.0.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.1.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.2.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.2.1\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.3.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.4.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.5.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.6.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.6.1\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.7.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.7.1\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.8.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.9.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.10.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.10.1\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.11.0\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.11.1\":{\"node_abi\":59,\"v8\":\"6.2\"},\"9.11.2\":{\"node_abi\":59,\"v8\":\"6.2\"},\"10.0.0\":{\"node_abi\":64,\"v8\":\"6.6\"},\"10.1.0\":{\"node_abi\":64,\"v8\":\"6.6\"},\"10.2.0\":{\"node_abi\":64,\"v8\":\"6.6\"},\"10.2.1\":{\"node_abi\":64,\"v8\":\"6.6\"},\"10.3.0\":{\"node_abi\":64,\"v8\":\"6.6\"},\"10.4.0\":{\"node_abi\":64,\"v8\":\"6.7\"},\"10.4.1\":{\"node_abi\":64,\"v8\":\"6.7\"},\"10.5.0\":{\"node_abi\":64,\"v8\":\"6.7\"},\"10.6.0\":{\"node_abi\":64,\"v8\":\"6.7\"},\"10.7.0\":{\"node_abi\":64,\"v8\":\"6.7\"},\"10.8.0\":{\"node_abi\":64,\"v8\":\"6.7\"},\"10.9.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.10.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.11.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.12.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.13.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.14.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.14.1\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.14.2\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.15.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.15.1\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.15.2\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.15.3\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.16.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.16.1\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.16.2\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.16.3\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.17.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.18.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.18.1\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.19.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.20.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.20.1\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.21.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.22.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.22.1\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.23.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.23.1\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.23.2\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.23.3\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.24.0\":{\"node_abi\":64,\"v8\":\"6.8\"},\"10.24.1\":{\"node_abi\":64,\"v8\":\"6.8\"},\"11.0.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.1.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.2.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.3.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.4.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.5.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.6.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.7.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.8.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.9.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.10.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.10.1\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.11.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.12.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.13.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.14.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"11.15.0\":{\"node_abi\":67,\"v8\":\"7.0\"},\"12.0.0\":{\"node_abi\":72,\"v8\":\"7.4\"},\"12.1.0\":{\"node_abi\":72,\"v8\":\"7.4\"},\"12.2.0\":{\"node_abi\":72,\"v8\":\"7.4\"},\"12.3.0\":{\"node_abi\":72,\"v8\":\"7.4\"},\"12.3.1\":{\"node_abi\":72,\"v8\":\"7.4\"},\"12.4.0\":{\"node_abi\":72,\"v8\":\"7.4\"},\"12.5.0\":{\"node_abi\":72,\"v8\":\"7.5\"},\"12.6.0\":{\"node_abi\":72,\"v8\":\"7.5\"},\"12.7.0\":{\"node_abi\":72,\"v8\":\"7.5\"},\"12.8.0\":{\"node_abi\":72,\"v8\":\"7.5\"},\"12.8.1\":{\"node_abi\":72,\"v8\":\"7.5\"},\"12.9.0\":{\"node_abi\":72,\"v8\":\"7.6\"},\"12.9.1\":{\"node_abi\":72,\"v8\":\"7.6\"},\"12.10.0\":{\"node_abi\":72,\"v8\":\"7.6\"},\"12.11.0\":{\"node_abi\":72,\"v8\":\"7.7\"},\"12.11.1\":{\"node_abi\":72,\"v8\":\"7.7\"},\"12.12.0\":{\"node_abi\":72,\"v8\":\"7.7\"},\"12.13.0\":{\"node_abi\":72,\"v8\":\"7.7\"},\"12.13.1\":{\"node_abi\":72,\"v8\":\"7.7\"},\"12.14.0\":{\"node_abi\":72,\"v8\":\"7.7\"},\"12.14.1\":{\"node_abi\":72,\"v8\":\"7.7\"},\"12.15.0\":{\"node_abi\":72,\"v8\":\"7.7\"},\"12.16.0\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.16.1\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.16.2\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.16.3\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.17.0\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.18.0\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.18.1\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.18.2\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.18.3\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.18.4\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.19.0\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.19.1\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.20.0\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.20.1\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.20.2\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.21.0\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.22.0\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.22.1\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.22.2\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.22.3\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.22.4\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.22.5\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.22.6\":{\"node_abi\":72,\"v8\":\"7.8\"},\"12.22.7\":{\"node_abi\":72,\"v8\":\"7.8\"},\"13.0.0\":{\"node_abi\":79,\"v8\":\"7.8\"},\"13.0.1\":{\"node_abi\":79,\"v8\":\"7.8\"},\"13.1.0\":{\"node_abi\":79,\"v8\":\"7.8\"},\"13.2.0\":{\"node_abi\":79,\"v8\":\"7.9\"},\"13.3.0\":{\"node_abi\":79,\"v8\":\"7.9\"},\"13.4.0\":{\"node_abi\":79,\"v8\":\"7.9\"},\"13.5.0\":{\"node_abi\":79,\"v8\":\"7.9\"},\"13.6.0\":{\"node_abi\":79,\"v8\":\"7.9\"},\"13.7.0\":{\"node_abi\":79,\"v8\":\"7.9\"},\"13.8.0\":{\"node_abi\":79,\"v8\":\"7.9\"},\"13.9.0\":{\"node_abi\":79,\"v8\":\"7.9\"},\"13.10.0\":{\"node_abi\":79,\"v8\":\"7.9\"},\"13.10.1\":{\"node_abi\":79,\"v8\":\"7.9\"},\"13.11.0\":{\"node_abi\":79,\"v8\":\"7.9\"},\"13.12.0\":{\"node_abi\":79,\"v8\":\"7.9\"},\"13.13.0\":{\"node_abi\":79,\"v8\":\"7.9\"},\"13.14.0\":{\"node_abi\":79,\"v8\":\"7.9\"},\"14.0.0\":{\"node_abi\":83,\"v8\":\"8.1\"},\"14.1.0\":{\"node_abi\":83,\"v8\":\"8.1\"},\"14.2.0\":{\"node_abi\":83,\"v8\":\"8.1\"},\"14.3.0\":{\"node_abi\":83,\"v8\":\"8.1\"},\"14.4.0\":{\"node_abi\":83,\"v8\":\"8.1\"},\"14.5.0\":{\"node_abi\":83,\"v8\":\"8.3\"},\"14.6.0\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.7.0\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.8.0\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.9.0\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.10.0\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.10.1\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.11.0\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.12.0\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.13.0\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.13.1\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.14.0\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.15.0\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.15.1\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.15.2\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.15.3\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.15.4\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.15.5\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.16.0\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.16.1\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.17.0\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.17.1\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.17.2\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.17.3\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.17.4\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.17.5\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.17.6\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.18.0\":{\"node_abi\":83,\"v8\":\"8.4\"},\"14.18.1\":{\"node_abi\":83,\"v8\":\"8.4\"},\"15.0.0\":{\"node_abi\":88,\"v8\":\"8.6\"},\"15.0.1\":{\"node_abi\":88,\"v8\":\"8.6\"},\"15.1.0\":{\"node_abi\":88,\"v8\":\"8.6\"},\"15.2.0\":{\"node_abi\":88,\"v8\":\"8.6\"},\"15.2.1\":{\"node_abi\":88,\"v8\":\"8.6\"},\"15.3.0\":{\"node_abi\":88,\"v8\":\"8.6\"},\"15.4.0\":{\"node_abi\":88,\"v8\":\"8.6\"},\"15.5.0\":{\"node_abi\":88,\"v8\":\"8.6\"},\"15.5.1\":{\"node_abi\":88,\"v8\":\"8.6\"},\"15.6.0\":{\"node_abi\":88,\"v8\":\"8.6\"},\"15.7.0\":{\"node_abi\":88,\"v8\":\"8.6\"},\"15.8.0\":{\"node_abi\":88,\"v8\":\"8.6\"},\"15.9.0\":{\"node_abi\":88,\"v8\":\"8.6\"},\"15.10.0\":{\"node_abi\":88,\"v8\":\"8.6\"},\"15.11.0\":{\"node_abi\":88,\"v8\":\"8.6\"},\"15.12.0\":{\"node_abi\":88,\"v8\":\"8.6\"},\"15.13.0\":{\"node_abi\":88,\"v8\":\"8.6\"},\"15.14.0\":{\"node_abi\":88,\"v8\":\"8.6\"},\"16.0.0\":{\"node_abi\":93,\"v8\":\"9.0\"},\"16.1.0\":{\"node_abi\":93,\"v8\":\"9.0\"},\"16.2.0\":{\"node_abi\":93,\"v8\":\"9.0\"},\"16.3.0\":{\"node_abi\":93,\"v8\":\"9.0\"},\"16.4.0\":{\"node_abi\":93,\"v8\":\"9.1\"},\"16.4.1\":{\"node_abi\":93,\"v8\":\"9.1\"},\"16.4.2\":{\"node_abi\":93,\"v8\":\"9.1\"},\"16.5.0\":{\"node_abi\":93,\"v8\":\"9.1\"},\"16.6.0\":{\"node_abi\":93,\"v8\":\"9.2\"},\"16.6.1\":{\"node_abi\":93,\"v8\":\"9.2\"},\"16.6.2\":{\"node_abi\":93,\"v8\":\"9.2\"},\"16.7.0\":{\"node_abi\":93,\"v8\":\"9.2\"},\"16.8.0\":{\"node_abi\":93,\"v8\":\"9.2\"},\"16.9.0\":{\"node_abi\":93,\"v8\":\"9.3\"},\"16.9.1\":{\"node_abi\":93,\"v8\":\"9.3\"},\"16.10.0\":{\"node_abi\":93,\"v8\":\"9.3\"},\"16.11.0\":{\"node_abi\":93,\"v8\":\"9.4\"},\"16.11.1\":{\"node_abi\":93,\"v8\":\"9.4\"},\"16.12.0\":{\"node_abi\":93,\"v8\":\"9.4\"},\"16.13.0\":{\"node_abi\":93,\"v8\":\"9.4\"},\"17.0.0\":{\"node_abi\":102,\"v8\":\"9.5\"},\"17.0.1\":{\"node_abi\":102,\"v8\":\"9.5\"},\"17.1.0\":{\"node_abi\":102,\"v8\":\"9.5\"}}");
+
+/***/ }),
+
+/***/ 6432:
+/***/ ((module) => {
+
+"use strict";
+module.exports = JSON.parse("{\"_from\":\"@mapbox/node-pre-gyp@^1.0.8\",\"_id\":\"@mapbox/node-pre-gyp@1.0.9\",\"_inBundle\":false,\"_integrity\":\"sha512-aDF3S3rK9Q2gey/WAttUlISduDItz5BU3306M9Eyv6/oS40aMprnopshtlKTykxRNIBEZuRMaZAnbrQ4QtKGyw==\",\"_location\":\"/@mapbox/node-pre-gyp\",\"_phantomChildren\":{},\"_requested\":{\"type\":\"range\",\"registry\":true,\"raw\":\"@mapbox/node-pre-gyp@^1.0.8\",\"name\":\"@mapbox/node-pre-gyp\",\"escapedName\":\"@mapbox%2fnode-pre-gyp\",\"scope\":\"@mapbox\",\"rawSpec\":\"^1.0.8\",\"saveSpec\":null,\"fetchSpec\":\"^1.0.8\"},\"_requiredBy\":[\"/ziti-sdk-nodejs\"],\"_resolved\":\"https://registry.npmjs.org/@mapbox/node-pre-gyp/-/node-pre-gyp-1.0.9.tgz\",\"_shasum\":\"09a8781a3a036151cdebbe8719d6f8b25d4058bc\",\"_spec\":\"@mapbox/node-pre-gyp@^1.0.8\",\"_where\":\"/home/kbingham/Sites/netfoundry/github/ziti-webhook-action/node_modules/ziti-sdk-nodejs\",\"author\":{\"name\":\"Dane Springmeyer\",\"email\":\"dane@mapbox.com\"},\"bin\":{\"node-pre-gyp\":\"bin/node-pre-gyp\"},\"bugs\":{\"url\":\"https://github.com/mapbox/node-pre-gyp/issues\"},\"bundleDependencies\":false,\"dependencies\":{\"detect-libc\":\"^2.0.0\",\"https-proxy-agent\":\"^5.0.0\",\"make-dir\":\"^3.1.0\",\"node-fetch\":\"^2.6.7\",\"nopt\":\"^5.0.0\",\"npmlog\":\"^5.0.1\",\"rimraf\":\"^3.0.2\",\"semver\":\"^7.3.5\",\"tar\":\"^6.1.11\"},\"deprecated\":false,\"description\":\"Node.js native addon binary install tool\",\"devDependencies\":{\"@mapbox/cloudfriend\":\"^5.1.0\",\"@mapbox/eslint-config-mapbox\":\"^3.0.0\",\"aws-sdk\":\"^2.1087.0\",\"codecov\":\"^3.8.3\",\"eslint\":\"^7.32.0\",\"eslint-plugin-node\":\"^11.1.0\",\"mock-aws-s3\":\"^4.0.2\",\"nock\":\"^12.0.3\",\"node-addon-api\":\"^4.3.0\",\"nyc\":\"^15.1.0\",\"tape\":\"^5.5.2\",\"tar-fs\":\"^2.1.1\"},\"homepage\":\"https://github.com/mapbox/node-pre-gyp#readme\",\"keywords\":[\"native\",\"addon\",\"module\",\"c\",\"c++\",\"bindings\",\"binary\"],\"license\":\"BSD-3-Clause\",\"main\":\"./lib/node-pre-gyp.js\",\"name\":\"@mapbox/node-pre-gyp\",\"nyc\":{\"all\":true,\"skip-full\":false,\"exclude\":[\"test/**\"]},\"repository\":{\"type\":\"git\",\"url\":\"git://github.com/mapbox/node-pre-gyp.git\"},\"scripts\":{\"coverage\":\"nyc --all --include index.js --include lib/ npm test\",\"fix\":\"npm run lint -- --fix\",\"lint\":\"eslint bin/node-pre-gyp lib/*js lib/util/*js test/*js scripts/*js\",\"test\":\"tape test/*test.js\",\"update-crosswalk\":\"node scripts/abi_crosswalk.js\",\"upload-coverage\":\"nyc report --reporter json && codecov --clear --flags=unit --file=./coverage/coverage-final.json\"},\"version\":\"1.0.9\"}");
 
 /***/ }),
 
@@ -18584,7 +20481,7 @@ module.exports = require("http");;
 
 /***/ }),
 
-/***/ 7211:
+/***/ 3034:
 /***/ ((module) => {
 
 "use strict";
