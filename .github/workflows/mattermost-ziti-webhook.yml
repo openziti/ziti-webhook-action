@@ -10,13 +10,18 @@ on:
   push:
   fork:
   release:
+  workflow_dispatch:
 
 jobs:
   mattermost-ziti-webhook:
     runs-on: macos-latest
     name: POST Webhook
     steps:
-    - uses: openziti/ziti-webhook-action@main
+    - name: Checkout Project
+      uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+    - uses: ./  # uses self to surface any issues 
       with:
         ziti-id: ${{ secrets.ZITI_MATTERMOST_IDENTITY }}
         webhook-url: ${{ secrets.ZITI_MATTERMOST_WEBHOOK_URL }}
