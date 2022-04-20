@@ -16,5 +16,5 @@ inputs:
   data:
     description: 'Arbitrary data to include in payload'
 runs:
-  using: 'node14'
+  using: 'node12'
   main: 'dist/index.js'
