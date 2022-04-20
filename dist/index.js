@@ -1,6 +1,184 @@
 /******/ (() => { // webpackBootstrap
 /******/ 	var __webpack_modules__ = ({
 
+/***/ 1298:
+/***/ ((__unused_webpack_module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const fs     = __nccwpck_require__(5747);
+const ziti   = __nccwpck_require__(3973);
+const core   = __nccwpck_require__(259);
+const github = __nccwpck_require__(9798);
+const crypto = __nccwpck_require__(6417);
+
+const UV_EOF = -4095;
+
+const zitiInit = async (zitiFile) => {
+  return new Promise((resolve, reject) => {
+    var rc = ziti.ziti_init(zitiFile, (init_rc) => {
+        if (init_rc < 0) {
+            return reject(`init_rc = ${init_rc}`);
+        }
+        return resolve();
+    });
+
+    if (rc < 0) {
+        return reject(`rc = ${rc}`);
+    }
+  });
+};
+
+const zitiServiceAvailable = async (service) => {
+  return new Promise((resolve, reject) => {
+    ziti.ziti_service_available(service, (obj) => {
+      if (obj.status != 0) {
+        console.log(`service ${service} not available, status: ${status}`);
+        return reject(status);
+      } else {
+        console.log(`service ${service} available`);
+        return resolve();
+      }
+    });
+  });
+}
+
+const zitiHttpRequest = async (url, method, headers) => {
+  return new Promise((resolve) => {
+    ziti.Ziti_http_request(
+      url, 
+      method,
+      headers,
+      (obj) => { // on_req callback
+          console.log('on_req callback: req is: %o', obj.req);
+          return resolve(obj.req);
+      },        
+      (obj) => { // on_resp callback
+        console.log(`on_resp status: ${obj.code} ${obj.status}`);
+        if (obj.code != 200) {
+          core.setFailed(`on_resp failure: ${obj.status}`);
+          process.exit(-1);
+        }
+        process.exit(0);
+      },
+      (obj) => { // on_resp_body callback
+        // not expecting any body...
+        if (obj.len === UV_EOF) {
+          console.log('response complete')
+          process.exit(0);
+        } else if (obj.len < 0) {
+          core.setFailed(`on_resp failure: ${obj.len}`);
+          process.exit(-1);
+        }
+
+        if (obj.body) {
+          let str = Buffer.from(obj.body).toString();
+          console.log(`on_resp_body len: ${obj.len}, body: ${str}`);
+        } else {
+          console.log(`on_resp_body len: ${obj.len}`);
+        }
+      });
+  });
+};
+
+const zitiHttpRequestData = async (req, buf) => {
+  ziti.Ziti_http_request_data(
+    req, 
+    buf,
+    (obj) => { // on_req_body callback
+      if (obj.status < 0) {
+          reject(obj.status);
+      } else {
+          resolve(obj);
+      }
+  });
+};
+
+function keyValuePairLinesToObj (string) {
+  var obj = {}; 
+  var stringArray = string.split("\n"); 
+  for(var i = 0; i < stringArray.length; i++){ 
+    var kvp = stringArray[i].split('=');
+    if(kvp[1]){
+      obj[kvp[0]] = kvp[1] 
+    }
+  }
+  return obj;
+}
+
+console.log('Going async...');
+(async function() {
+  try {
+    const zidFile       = './zid.json'
+    const zitiId        = core.getInput('ziti-id');
+    const webhookUrl    = core.getInput('webhook-url');
+    const webhookSecret = core.getInput('webhook-secret');
+    const extraKeyValuePairLines = core.getInput('data');
+
+    console.log(`Webhook URL: ${webhookUrl}`);
+
+    // Write zitiId to file
+    fs.writeFileSync(zidFile, zitiId);
+
+    // First make sure we can initialize Ziti
+    await zitiInit(zidFile).catch((err) => {
+      core.setFailed(`zitiInit failed: ${err}`);
+      process.exit(-1);
+    });
+
+    // Make sure we have ziti service available
+    // Note: ziti-sdk-nodejs (currently) requires service name to match URL host
+    // (TODO: write an issue to change this - no reason that should need to match, and can lead to errors)
+    let url = new URL(webhookUrl);
+    let serviceName = url.hostname;
+    await zitiServiceAvailable(serviceName).catch((err) => {
+      core.setFailed(`zitiServiceAvailable failed: ${err}`);
+      process.exit(-1);
+    });
+
+    // Get the JSON webhook payload for the event that triggered the workflow and merge with extra data dict from action input
+    var extraData = {'data': keyValuePairLinesToObj(extraKeyValuePairLines)}
+    var payloadData =  Object.assign({}, github.context.payload, extraData);
+    const payload = JSON.stringify(payloadData, undefined, 2)
+    var payloadBuf = Buffer.from(payload, 'utf8');
+    //console.log(`The event payload: ${payload}`);
+
+    // Sign the payload
+    let sig = "sha1=" + crypto.createHmac('sha1', webhookSecret).update(payloadBuf).digest('hex');
+    let sig256 = "sha256=" + crypto.createHmac('sha256', webhookSecret).update(payloadBuf).digest('hex');
+    const hookshot = 'ziti-webhook-action';
+    const { v4: uuidv4 } = __nccwpck_require__(8230);
+    const guid = uuidv4(); 
+
+    // Send it over Ziti
+    let headersArray = [
+      `User-Agent: GitHub-Hookshot/${hookshot}`, 
+      'Content-Type: application/json',
+      `X-GitHub-Delivery: ${guid}`,
+      `Content-Length: ${payloadBuf.length}`,
+      `X-Hub-Signature: ${sig}`,
+      `X-Hub-Signature-256: ${sig256}`,
+      `X-GitHub-Event: ${github.context.eventName}`
+    ];
+
+    let req = await zitiHttpRequest(webhookUrl, 'POST',headersArray).catch((err) => {
+      core.setFailed(`zitiHttpRequest failed: ${err}`);
+      process.exit(-1);
+    });
+
+    // Send the payload
+    results = await zitiHttpRequestData(req, payloadBuf).catch((err) => {
+      core.setFailed(`zitiHttpRequestData failed: ${err}`);
+      process.exit(-1);
+    });
+    ziti.Ziti_http_request_end(req);
+
+  } catch (error) {
+    core.setFailed(error.message);
+  }
+}());
+
+
+/***/ }),
+
 /***/ 6744:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -14,7 +192,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
     return result;
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-const os = __importStar(__nccwpck_require__(2037));
+const os = __importStar(__nccwpck_require__(2087));
 const utils_1 = __nccwpck_require__(7168);
 /**
  * Commands
@@ -112,8 +290,8 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 const command_1 = __nccwpck_require__(6744);
 const file_command_1 = __nccwpck_require__(2927);
 const utils_1 = __nccwpck_require__(7168);
-const os = __importStar(__nccwpck_require__(2037));
-const path = __importStar(__nccwpck_require__(1017));
+const os = __importStar(__nccwpck_require__(2087));
+const path = __importStar(__nccwpck_require__(5622));
 /**
  * The code to exit an action
  */
@@ -348,8 +526,8 @@ var __importStar = (this && this.__importStar) || function (mod) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 // We use any as a valid input type
 /* eslint-disable @typescript-eslint/no-explicit-any */
-const fs = __importStar(__nccwpck_require__(7147));
-const os = __importStar(__nccwpck_require__(2037));
+const fs = __importStar(__nccwpck_require__(5747));
+const os = __importStar(__nccwpck_require__(2087));
 const utils_1 = __nccwpck_require__(7168);
 function issueCommand(command, message) {
     const filePath = process.env[`GITHUB_${command}`];
@@ -611,8 +789,8 @@ exports.getOctokitOptions = getOctokitOptions;
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-const http = __nccwpck_require__(3685);
-const https = __nccwpck_require__(2241);
+const http = __nccwpck_require__(8605);
+const https = __nccwpck_require__(7211);
 const pm = __nccwpck_require__(2113);
 let tunnel;
 var HttpCodes;
@@ -3732,7 +3910,7 @@ util.inherits(TrackerBase, EventEmitter)
 
 "use strict";
 
-var util = __nccwpck_require__(3837)
+var util = __nccwpck_require__(1669)
 var TrackerBase = __nccwpck_require__(3361)
 var Tracker = __nccwpck_require__(8174)
 var TrackerStream = __nccwpck_require__(7488)
@@ -3847,7 +4025,7 @@ TrackerGroup.prototype.debug = function (depth) {
 
 "use strict";
 
-var util = __nccwpck_require__(3837)
+var util = __nccwpck_require__(1669)
 var stream = __nccwpck_require__(1682)
 var delegate = __nccwpck_require__(8241)
 var Tracker = __nccwpck_require__(8174)
@@ -3891,7 +4069,7 @@ delegate(TrackerStream.prototype, 'tracker')
 
 "use strict";
 
-var util = __nccwpck_require__(3837)
+var util = __nccwpck_require__(1669)
 var TrackerBase = __nccwpck_require__(3361)
 
 var Tracker = module.exports = function (name, todo) {
@@ -6291,7 +6469,7 @@ function ownProp (obj, field) {
   return Object.prototype.hasOwnProperty.call(obj, field)
 }
 
-var path = __nccwpck_require__(1017)
+var path = __nccwpck_require__(5622)
 var minimatch = __nccwpck_require__(3661)
 var isAbsolute = __nccwpck_require__(3122)
 var Minimatch = minimatch.Minimatch
@@ -6566,14 +6744,14 @@ function childrenIgnored (self, path) {
 
 module.exports = glob
 
-var fs = __nccwpck_require__(7147)
+var fs = __nccwpck_require__(5747)
 var rp = __nccwpck_require__(2775)
 var minimatch = __nccwpck_require__(3661)
 var Minimatch = minimatch.Minimatch
 var inherits = __nccwpck_require__(8995)
-var EE = (__nccwpck_require__(2361).EventEmitter)
-var path = __nccwpck_require__(1017)
-var assert = __nccwpck_require__(9491)
+var EE = __nccwpck_require__(8614).EventEmitter
+var path = __nccwpck_require__(5622)
+var assert = __nccwpck_require__(2357)
 var isAbsolute = __nccwpck_require__(3122)
 var globSync = __nccwpck_require__(2116)
 var common = __nccwpck_require__(7792)
@@ -6582,7 +6760,7 @@ var alphasorti = common.alphasorti
 var setopts = common.setopts
 var ownProp = common.ownProp
 var inflight = __nccwpck_require__(4394)
-var util = __nccwpck_require__(3837)
+var util = __nccwpck_require__(1669)
 var childrenIgnored = common.childrenIgnored
 var isIgnored = common.isIgnored
 
@@ -7324,14 +7502,14 @@ Glob.prototype._stat2 = function (f, abs, er, stat, cb) {
 module.exports = globSync
 globSync.GlobSync = GlobSync
 
-var fs = __nccwpck_require__(7147)
+var fs = __nccwpck_require__(5747)
 var rp = __nccwpck_require__(2775)
 var minimatch = __nccwpck_require__(3661)
 var Minimatch = minimatch.Minimatch
-var Glob = (__nccwpck_require__(9940).Glob)
-var util = __nccwpck_require__(3837)
-var path = __nccwpck_require__(1017)
-var assert = __nccwpck_require__(9491)
+var Glob = __nccwpck_require__(9940).Glob
+var util = __nccwpck_require__(1669)
+var path = __nccwpck_require__(5622)
+var assert = __nccwpck_require__(2357)
 var isAbsolute = __nccwpck_require__(3122)
 var common = __nccwpck_require__(7792)
 var alphasort = common.alphasort
@@ -9153,7 +9331,7 @@ FetchError.prototype.name = 'FetchError';
 
 let convert;
 try {
-	convert = (__nccwpck_require__(1335).convert);
+	convert = __nccwpck_require__(1335).convert;
 } catch (e) {}
 
 const INTERNALS = Symbol('Body internals');
@@ -10661,8 +10839,8 @@ module.exports = exports;
  * Module dependencies.
  */
 
-var fs = __nccwpck_require__(7147);
-var path = __nccwpck_require__(1017);
+var fs = __nccwpck_require__(5747);
+var path = __nccwpck_require__(5622);
 var nopt = __nccwpck_require__(3865);
 var log = __nccwpck_require__(5385);
 log.disableProgress();
@@ -10864,8 +11042,8 @@ Object.defineProperty(proto, 'version', {
 
 var versioning = __nccwpck_require__(5625);
 var napi = __nccwpck_require__(3565);
-var existsSync = (__nccwpck_require__(7147).existsSync) || (__nccwpck_require__(1017).existsSync);
-var path = __nccwpck_require__(1017);
+var existsSync = __nccwpck_require__(5747).existsSync || __nccwpck_require__(5622).existsSync;
+var path = __nccwpck_require__(5622);
 
 module.exports = exports;
 
@@ -11114,9 +11292,9 @@ module.exports.build_napi_only = function(package_json) {
 
 module.exports = exports;
 
-var path = __nccwpck_require__(1017);
+var path = __nccwpck_require__(5622);
 var semver = __nccwpck_require__(4834);
-var url = __nccwpck_require__(7310);
+var url = __nccwpck_require__(8835);
 var detect_libc = __nccwpck_require__(4549);
 var napi = __nccwpck_require__(3565);
 
@@ -11454,9 +11632,9 @@ var debug = process.env.DEBUG_NOPT || process.env.NOPT_DEBUG
   ? function () { console.error.apply(console, arguments) }
   : function () {}
 
-var url = __nccwpck_require__(7310)
-  , path = __nccwpck_require__(1017)
-  , Stream = (__nccwpck_require__(2781).Stream)
+var url = __nccwpck_require__(8835)
+  , path = __nccwpck_require__(5622)
+  , Stream = __nccwpck_require__(2413).Stream
   , abbrev = __nccwpck_require__(9875)
   , osenv = __nccwpck_require__(6263)
 
@@ -11900,7 +12078,7 @@ function resolveShort (arg, shorthands, shortAbbr, abbrevs) {
 
 var Progress = __nccwpck_require__(2579)
 var Gauge = __nccwpck_require__(2770)
-var EE = (__nccwpck_require__(2361).EventEmitter)
+var EE = __nccwpck_require__(8614).EventEmitter
 var log = exports = module.exports = new EE()
 var util = __nccwpck_require__(3837)
 
@@ -12438,8 +12616,8 @@ module.exports = function () {
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
 var isWindows = process.platform === 'win32'
-var path = __nccwpck_require__(1017)
-var exec = (__nccwpck_require__(2081).exec)
+var path = __nccwpck_require__(5622)
+var exec = __nccwpck_require__(3129).exec
 var osTmpdir = __nccwpck_require__(3813)
 var osHomedir = __nccwpck_require__(2348)
 
@@ -12844,7 +13022,7 @@ var Stream = __nccwpck_require__(1058);
 
 /*<replacement>*/
 
-var Buffer = (__nccwpck_require__(4880).Buffer);
+var Buffer = __nccwpck_require__(4880).Buffer;
 var OurUint8Array = global.Uint8Array || function () {};
 function _uint8ArrayToBuffer(chunk) {
   return Buffer.from(chunk);
@@ -12961,7 +13139,7 @@ function ReadableState(options, stream) {
   this.decoder = null;
   this.encoding = null;
   if (options.encoding) {
-    if (!StringDecoder) StringDecoder = (__nccwpck_require__(361)/* .StringDecoder */ .s);
+    if (!StringDecoder) StringDecoder = __nccwpck_require__(361)/* .StringDecoder */ .s;
     this.decoder = new StringDecoder(options.encoding);
     this.encoding = options.encoding;
   }
@@ -13117,7 +13295,7 @@ Readable.prototype.isPaused = function () {
 
 // backwards compatibility.
 Readable.prototype.setEncoding = function (enc) {
-  if (!StringDecoder) StringDecoder = (__nccwpck_require__(361)/* .StringDecoder */ .s);
+  if (!StringDecoder) StringDecoder = __nccwpck_require__(361)/* .StringDecoder */ .s;
   this._readableState.decoder = new StringDecoder(enc);
   this._readableState.encoding = enc;
   return this;
@@ -14119,7 +14297,7 @@ var Stream = __nccwpck_require__(1058);
 
 /*<replacement>*/
 
-var Buffer = (__nccwpck_require__(4880).Buffer);
+var Buffer = __nccwpck_require__(4880).Buffer;
 var OurUint8Array = global.Uint8Array || function () {};
 function _uint8ArrayToBuffer(chunk) {
   return Buffer.from(chunk);
@@ -14735,8 +14913,8 @@ Writable.prototype._destroy = function (err, cb) {
 
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
 
-var Buffer = (__nccwpck_require__(4880).Buffer);
-var util = __nccwpck_require__(3837);
+var Buffer = __nccwpck_require__(4880).Buffer;
+var util = __nccwpck_require__(1669);
 
 function copyBuffer(src, target, offset) {
   src.copy(target, offset);
@@ -16886,7 +17064,7 @@ module.exports = function (blocking) {
 // Note: since nyc uses this module to output coverage, any lines
 // that are in the direct sync flow of nyc's outputCoverage are
 // ignored, since we can never get coverage for them.
-var assert = __nccwpck_require__(9491)
+var assert = __nccwpck_require__(2357)
 var signals = __nccwpck_require__(9440)
 var isWin = /^win/i.test(process.platform)
 
@@ -17184,7 +17362,7 @@ module.exports = function (str) {
 
 /*<replacement>*/
 
-var Buffer = (__nccwpck_require__(4880).Buffer);
+var Buffer = __nccwpck_require__(4880).Buffer;
 /*</replacement>*/
 
 var isEncoding = Buffer.isEncoding || function (encoding) {
@@ -17791,8 +17969,8 @@ module.exports = __nccwpck_require__(3837).deprecate;
 
 /***/ }),
 
-/***/ 2576:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+/***/ 8230:
+/***/ ((__unused_webpack_module, __webpack_exports__, __nccwpck_require__) => {
 
 "use strict";
 
@@ -18585,7 +18763,7 @@ if (typeof require.context == 'function') {
 } else {
 
     const binary = __nccwpck_require__(7796);
-    const path = __nccwpck_require__(1017)
+    const path = __nccwpck_require__(5622)
     const binding_path = __nccwpck_require__.ab + "build/Release/node-v83-linux-x64/ziti_sdk_nodejs.node";
 
     binding = __nccwpck_require__(5687);
@@ -18624,7 +18802,7 @@ module.exports = require("assert");
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("buffer");
+module.exports = JSON.parse("{\"_args\":[[\"node-pre-gyp@0.14.0\",\"/home/kbingham/Sites/netfoundry/github/ziti-webhook-action\"]],\"_from\":\"node-pre-gyp@0.14.0\",\"_id\":\"node-pre-gyp@0.14.0\",\"_inBundle\":false,\"_integrity\":\"sha512-+CvDC7ZttU/sSt9rFjix/P05iS43qHCOOGzcr3Ry99bXG7VX953+vFyEuph/tfqoYu8dttBkE86JSKBO2OzcxA==\",\"_location\":\"/node-pre-gyp\",\"_phantomChildren\":{},\"_requested\":{\"type\":\"version\",\"registry\":true,\"raw\":\"node-pre-gyp@0.14.0\",\"name\":\"node-pre-gyp\",\"escapedName\":\"node-pre-gyp\",\"rawSpec\":\"0.14.0\",\"saveSpec\":null,\"fetchSpec\":\"0.14.0\"},\"_requiredBy\":[\"/ziti-sdk-nodejs\"],\"_resolved\":\"https://registry.npmjs.org/node-pre-gyp/-/node-pre-gyp-0.14.0.tgz\",\"_spec\":\"0.14.0\",\"_where\":\"/home/kbingham/Sites/netfoundry/github/ziti-webhook-action\",\"author\":{\"name\":\"Dane Springmeyer\",\"email\":\"dane@mapbox.com\"},\"bin\":{\"node-pre-gyp\":\"bin/node-pre-gyp\"},\"bugs\":{\"url\":\"https://github.com/mapbox/node-pre-gyp/issues\"},\"dependencies\":{\"detect-libc\":\"^1.0.2\",\"mkdirp\":\"^0.5.1\",\"needle\":\"^2.2.1\",\"nopt\":\"^4.0.1\",\"npm-packlist\":\"^1.1.6\",\"npmlog\":\"^4.0.2\",\"rc\":\"^1.2.7\",\"rimraf\":\"^2.6.1\",\"semver\":\"^5.3.0\",\"tar\":\"^4.4.2\"},\"description\":\"Node.js native addon binary install tool\",\"devDependencies\":{\"aws-sdk\":\"^2.28.0\",\"jshint\":\"^2.9.5\",\"nock\":\"^9.2.3\",\"tape\":\"^4.6.3\"},\"homepage\":\"https://github.com/mapbox/node-pre-gyp#readme\",\"jshintConfig\":{\"node\":true,\"globalstrict\":true,\"undef\":true,\"unused\":false,\"noarg\":true},\"keywords\":[\"native\",\"addon\",\"module\",\"c\",\"c++\",\"bindings\",\"binary\"],\"license\":\"BSD-3-Clause\",\"main\":\"./lib/node-pre-gyp.js\",\"name\":\"node-pre-gyp\",\"repository\":{\"type\":\"git\",\"url\":\"git://github.com/mapbox/node-pre-gyp.git\"},\"scripts\":{\"pretest\":\"jshint test/build.test.js test/s3_setup.test.js test/versioning.test.js test/fetch.test.js lib lib/util scripts bin/node-pre-gyp\",\"test\":\"jshint lib lib/util scripts bin/node-pre-gyp && tape test/*test.js\",\"update-crosswalk\":\"node scripts/abi_crosswalk.js\"},\"version\":\"0.14.0\"}");
 
 /***/ }),
 
@@ -18791,171 +18969,10 @@ module.exports = JSON.parse('{"_args":[["node-pre-gyp@0.14.0","/home/kbingham/Si
 /************************************************************************/
 /******/ 	/* webpack/runtime/compat */
 /******/ 	
-/******/ 	if (typeof __nccwpck_require__ !== 'undefined') __nccwpck_require__.ab = __dirname + "/";
-/******/ 	
-/************************************************************************/
-var __webpack_exports__ = {};
-// This entry need to be wrapped in an IIFE because it need to be isolated against other modules in the chunk.
-(() => {
-const fs     = __nccwpck_require__(7147);
-const ziti   = __nccwpck_require__(3973);
-const core   = __nccwpck_require__(259);
-const github = __nccwpck_require__(9798);
-const crypto = __nccwpck_require__(6113);
-
-const UV_EOF = -4095;
-
-const zitiInit = async (zitiFile) => {
-  return new Promise((resolve, reject) => {
-    var rc = ziti.ziti_init(zitiFile, (init_rc) => {
-        if (init_rc < 0) {
-            return reject(`init_rc = ${init_rc}`);
-        }
-        return resolve();
-    });
-
-    if (rc < 0) {
-        return reject(`rc = ${rc}`);
-    }
-  });
-};
-
-const zitiServiceAvailable = async (service) => {
-  return new Promise((resolve, reject) => {
-    ziti.ziti_service_available(service, (obj) => {
-      if (obj.status != 0) {
-        console.log(`service ${service} not available, status: ${status}`);
-        return reject(status);
-      } else {
-        console.log(`service ${service} available`);
-        return resolve();
-      }
-    });
-  });
-}
-
-const zitiHttpRequest = async (url, method, headers) => {
-  return new Promise((resolve) => {
-    ziti.Ziti_http_request(
-      url, 
-      method,
-      headers,
-      (obj) => { // on_req callback
-          console.log('on_req callback: req is: %o', obj.req);
-          return resolve(obj.req);
-      },        
-      (obj) => { // on_resp callback
-        console.log(`on_resp status: ${obj.code} ${obj.status}`);
-        if (obj.code != 200) {
-          core.setFailed(`on_resp failure: ${obj.status}`);
-          process.exit(-1);
-        }
-        process.exit(0);
-      },
-      (obj) => { // on_resp_body callback
-        // not expecting any body...
-        if (obj.len === UV_EOF) {
-          console.log('response complete')
-          process.exit(0);
-        } else if (obj.len < 0) {
-          core.setFailed(`on_resp failure: ${obj.len}`);
-          process.exit(-1);
-        }
-
-        if (obj.body) {
-          let str = Buffer.from(obj.body).toString();
-          console.log(`on_resp_body len: ${obj.len}, body: ${str}`);
-        } else {
-          console.log(`on_resp_body len: ${obj.len}`);
-        }
-      });
-  });
-};
-
-const zitiHttpRequestData = async (req, buf) => {
-  ziti.Ziti_http_request_data(
-    req, 
-    buf,
-    (obj) => { // on_req_body callback
-      if (obj.status < 0) {
-          reject(obj.status);
-      } else {
-          resolve(obj);
-      }
-  });
-};
-
-console.log('Going async...');
-(async function() {
-  try {
-    const zidFile       = './zid.json'
-    const zitiId        = core.getInput('ziti-id');
-    const webhookUrl    = core.getInput('webhook-url');
-    const webhookSecret = core.getInput('webhook-secret');
-
-    console.log(`Webhook URL: ${webhookUrl}`);
-
-    // Write zitiId to file
-    fs.writeFileSync(zidFile, zitiId);
-
-    // First make sure we can initialize Ziti
-    await zitiInit(zidFile).catch((err) => {
-      core.setFailed(`zitiInit failed: ${err}`);
-      process.exit(-1);
-    });
-
-    // Make sure we have ziti service available
-    // Note: ziti-sdk-nodejs (currently) requires service name to match URL host
-    // (TODO: write an issue to change this - no reason that should need to match, and can lead to errors)
-    let url = new URL(webhookUrl);
-    let serviceName = url.hostname;
-    await zitiServiceAvailable(serviceName).catch((err) => {
-      core.setFailed(`zitiServiceAvailable failed: ${err}`);
-      process.exit(-1);
-    });
-
-    // Get the JSON webhook payload for the event that triggered the workflow
-    const payload = JSON.stringify(github.context.payload, undefined, 2)
-    var payloadBuf = Buffer.from(payload, 'utf8');
-    //console.log(`The event payload: ${payload}`);
-
-    // Sign the payload
-    let sig = "sha1=" + crypto.createHmac('sha1', webhookSecret).update(payloadBuf).digest('hex');
-    let sig256 = "sha256=" + crypto.createHmac('sha256', webhookSecret).update(payloadBuf).digest('hex');
-    const hookshot = 'ziti-webhook-action';
-    const { v4: uuidv4 } = __nccwpck_require__(2576);
-    const guid = uuidv4(); 
-
-    // Send it over Ziti
-    let headersArray = [
-      `User-Agent: GitHub-Hookshot/${hookshot}`, 
-      'Content-Type: application/json',
-      `X-GitHub-Delivery: ${guid}`,
-      `Content-Length: ${payloadBuf.length}`,
-      `X-Hub-Signature: ${sig}`,
-      `X-Hub-Signature-256: ${sig256}`,
-      `X-GitHub-Event: ${github.context.eventName}`
-    ];
-
-    let req = await zitiHttpRequest(webhookUrl, 'POST',headersArray).catch((err) => {
-      core.setFailed(`zitiHttpRequest failed: ${err}`);
-      process.exit(-1);
-    });
-
-    // Send the payload
-    results = await zitiHttpRequestData(req, payloadBuf).catch((err) => {
-      core.setFailed(`zitiHttpRequestData failed: ${err}`);
-      process.exit(-1);
-    });
-    ziti.Ziti_http_request_end(req);
-
-  } catch (error) {
-    core.setFailed(error.message);
-  }
-}());
-
-})();
-
-module.exports = __webpack_exports__;
+/******/ 	__nccwpck_require__.ab = __dirname + "/";/************************************************************************/
+/******/ 	// module exports must be returned from runtime so entry inlining is disabled
+/******/ 	// startup
+/******/ 	// Load entry module and return exports
+/******/ 	return __nccwpck_require__(1298);
 /******/ })()
 ;
