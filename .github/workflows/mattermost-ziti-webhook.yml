@@ -21,7 +21,7 @@ jobs:
       uses: actions/checkout@v2
       with:
         fetch-depth: 0
-    - uses: ${{ github.workspace }}  # uses self to surface any issues 
+    - uses: ./  # uses self to surface any issues 
       with:
         ziti-id: ${{ secrets.ZITI_MATTERMOST_IDENTITY }}
         webhook-url: ${{ secrets.ZITI_MATTERMOST_WEBHOOK_URL }}
