@@ -1,27 +1,26 @@
 {
-  "_from": "ziti-sdk-nodejs@0.3.1",
+  "_from": "ziti-sdk-nodejs@^0.3.1",
   "_id": "ziti-sdk-nodejs@0.3.1",
   "_inBundle": false,
   "_integrity": "sha512-mEHBgT+EWAJ62nNrk8DoJJa6B07aldGv4WkKJa1OTfTqZxhVkNqUAa1FLknbZnXtc8t/6FQpph6cWYxmRqdAHg==",
   "_location": "/ziti-sdk-nodejs",
   "_phantomChildren": {},
   "_requested": {
-    "type": "version",
+    "type": "range",
     "registry": true,
-    "raw": "ziti-sdk-nodejs@0.3.1",
+    "raw": "ziti-sdk-nodejs@^0.3.1",
     "name": "ziti-sdk-nodejs",
     "escapedName": "ziti-sdk-nodejs",
-    "rawSpec": "0.3.1",
+    "rawSpec": "^0.3.1",
     "saveSpec": null,
-    "fetchSpec": "0.3.1"
+    "fetchSpec": "^0.3.1"
   },
   "_requiredBy": [
-    "#USER",
     "/"
   ],
   "_resolved": "https://registry.npmjs.org/ziti-sdk-nodejs/-/ziti-sdk-nodejs-0.3.1.tgz",
   "_shasum": "66e01823f18317473f914df9f4ab7f99bb12142a",
-  "_spec": "ziti-sdk-nodejs@0.3.1",
+  "_spec": "ziti-sdk-nodejs@^0.3.1",
   "_where": "/home/kbingham/Sites/netfoundry/github/ziti-webhook-action",
   "author": {
     "name": "NetFoundry",
