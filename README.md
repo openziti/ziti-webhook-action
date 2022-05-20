@@ -2,6 +2,10 @@
 
 This GitHub workflow action uses [Ziti NodeJS SDK](https://github.com/openziti/ziti-sdk-nodejs) to post an event's `payload` in JSON format over a `Ziti` connection.  
 
+## MacOS Compatibility
+
+If you have a MacOS job you may wish to use `@v1` ref which works with the `macos-latest` hosted runner.
+
 ## Usage
 
 ```yml
@@ -10,11 +14,10 @@ on: [ push ]
 
 jobs:
   ziti-action:
-    # Currently only runs on macos
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     name: Ziti Webhook Action
     steps:
-    - uses: openziti/ziti-webhook-action@main
+    - uses: openziti/ziti-webhook-action@v2
       with:
         # Identity JSON containing key to access a Ziti network
         ziti-id: ${{ secrets.ZITI_WEBHOOK_ACTION_ID }}
