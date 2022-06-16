@@ -1,10 +1,10 @@
 /******/ (() => { // webpackBootstrap
 /******/ 	var __webpack_modules__ = ({
 
-/***/ 9289:
+/***/ 1961:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-module.exports = require(__nccwpck_require__.ab + "build/Release/node-v83-linux-x64/ziti_sdk_nodejs.node")
+module.exports = require(__nccwpck_require__.ab + "build/Release/node-v93-linux-x64/ziti_sdk_nodejs.node")
 
 /***/ }),
 
@@ -6800,9 +6800,9 @@ if (typeof require.context == 'function') {
 
     const binary = __nccwpck_require__(5128);
     const path = __nccwpck_require__(1017)
-    const binding_path = __nccwpck_require__.ab + "build/Release/node-v83-linux-x64/ziti_sdk_nodejs.node";
+    const binding_path = __nccwpck_require__.ab + "build/Release/node-v93-linux-x64/ziti_sdk_nodejs.node";
 
-    binding = __nccwpck_require__(9289);
+    binding = __nccwpck_require__(1961);
     
 }
 
@@ -26065,7 +26065,7 @@ module.exports = JSON.parse('{"0.1.14":{"node_abi":null,"v8":"1.3"},"0.1.15":{"n
 /***/ ((module) => {
 
 "use strict";
-module.exports = JSON.parse('{"_from":"@mapbox/node-pre-gyp@^1.0.8","_id":"@mapbox/node-pre-gyp@1.0.9","_inBundle":false,"_integrity":"sha512-aDF3S3rK9Q2gey/WAttUlISduDItz5BU3306M9Eyv6/oS40aMprnopshtlKTykxRNIBEZuRMaZAnbrQ4QtKGyw==","_location":"/@mapbox/node-pre-gyp","_phantomChildren":{},"_requested":{"type":"range","registry":true,"raw":"@mapbox/node-pre-gyp@^1.0.8","name":"@mapbox/node-pre-gyp","escapedName":"@mapbox%2fnode-pre-gyp","scope":"@mapbox","rawSpec":"^1.0.8","saveSpec":null,"fetchSpec":"^1.0.8"},"_requiredBy":["/@openziti/ziti-sdk-nodejs"],"_resolved":"https://registry.npmjs.org/@mapbox/node-pre-gyp/-/node-pre-gyp-1.0.9.tgz","_shasum":"09a8781a3a036151cdebbe8719d6f8b25d4058bc","_spec":"@mapbox/node-pre-gyp@^1.0.8","_where":"/home/kbingham/Sites/netfoundry/github/ziti-webhook-action/node_modules/@openziti/ziti-sdk-nodejs","author":{"name":"Dane Springmeyer","email":"dane@mapbox.com"},"bin":{"node-pre-gyp":"bin/node-pre-gyp"},"bugs":{"url":"https://github.com/mapbox/node-pre-gyp/issues"},"bundleDependencies":false,"dependencies":{"detect-libc":"^2.0.0","https-proxy-agent":"^5.0.0","make-dir":"^3.1.0","node-fetch":"^2.6.7","nopt":"^5.0.0","npmlog":"^5.0.1","rimraf":"^3.0.2","semver":"^7.3.5","tar":"^6.1.11"},"deprecated":false,"description":"Node.js native addon binary install tool","devDependencies":{"@mapbox/cloudfriend":"^5.1.0","@mapbox/eslint-config-mapbox":"^3.0.0","aws-sdk":"^2.1087.0","codecov":"^3.8.3","eslint":"^7.32.0","eslint-plugin-node":"^11.1.0","mock-aws-s3":"^4.0.2","nock":"^12.0.3","node-addon-api":"^4.3.0","nyc":"^15.1.0","tape":"^5.5.2","tar-fs":"^2.1.1"},"homepage":"https://github.com/mapbox/node-pre-gyp#readme","keywords":["native","addon","module","c","c++","bindings","binary"],"license":"BSD-3-Clause","main":"./lib/node-pre-gyp.js","name":"@mapbox/node-pre-gyp","nyc":{"all":true,"skip-full":false,"exclude":["test/**"]},"repository":{"type":"git","url":"git://github.com/mapbox/node-pre-gyp.git"},"scripts":{"coverage":"nyc --all --include index.js --include lib/ npm test","fix":"npm run lint -- --fix","lint":"eslint bin/node-pre-gyp lib/*js lib/util/*js test/*js scripts/*js","test":"tape test/*test.js","update-crosswalk":"node scripts/abi_crosswalk.js","upload-coverage":"nyc report --reporter json && codecov --clear --flags=unit --file=./coverage/coverage-final.json"},"version":"1.0.9"}');
+module.exports = JSON.parse('{"name":"@mapbox/node-pre-gyp","description":"Node.js native addon binary install tool","version":"1.0.9","keywords":["native","addon","module","c","c++","bindings","binary"],"license":"BSD-3-Clause","author":"Dane Springmeyer <dane@mapbox.com>","repository":{"type":"git","url":"git://github.com/mapbox/node-pre-gyp.git"},"bin":"./bin/node-pre-gyp","main":"./lib/node-pre-gyp.js","dependencies":{"detect-libc":"^2.0.0","https-proxy-agent":"^5.0.0","make-dir":"^3.1.0","node-fetch":"^2.6.7","nopt":"^5.0.0","npmlog":"^5.0.1","rimraf":"^3.0.2","semver":"^7.3.5","tar":"^6.1.11"},"devDependencies":{"@mapbox/cloudfriend":"^5.1.0","@mapbox/eslint-config-mapbox":"^3.0.0","aws-sdk":"^2.1087.0","codecov":"^3.8.3","eslint":"^7.32.0","eslint-plugin-node":"^11.1.0","mock-aws-s3":"^4.0.2","nock":"^12.0.3","node-addon-api":"^4.3.0","nyc":"^15.1.0","tape":"^5.5.2","tar-fs":"^2.1.1"},"nyc":{"all":true,"skip-full":false,"exclude":["test/**"]},"scripts":{"coverage":"nyc --all --include index.js --include lib/ npm test","upload-coverage":"nyc report --reporter json && codecov --clear --flags=unit --file=./coverage/coverage-final.json","lint":"eslint bin/node-pre-gyp lib/*js lib/util/*js test/*js scripts/*js","fix":"npm run lint -- --fix","update-crosswalk":"node scripts/abi_crosswalk.js","test":"tape test/*test.js"}}');
 
 /***/ }),
 
