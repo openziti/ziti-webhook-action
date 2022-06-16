@@ -6659,7 +6659,7 @@ limitations under the License.
 */
 
 const EventEmitter = __nccwpck_require__(2361);
-const stream = __nccwpck_require__(4492);
+const stream = __nccwpck_require__(2781);
 const zitiWrite = (__nccwpck_require__(3203).write);
 
 
@@ -25978,14 +25978,6 @@ module.exports = require("https");
 
 "use strict";
 module.exports = require("net");
-
-/***/ }),
-
-/***/ 4492:
-/***/ ((module) => {
-
-"use strict";
-module.exports = require("node:stream");
 
 /***/ }),
 
