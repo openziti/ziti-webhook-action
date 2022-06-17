@@ -1,5 +1,5 @@
 const fs     = require('fs');
-const ziti   = require('ziti-sdk-nodejs');
+const ziti   = require('@openziti/ziti-sdk-nodejs');
 const core   = require('@actions/core');
 const github = require('@actions/github');
 const crypto = require('crypto');
