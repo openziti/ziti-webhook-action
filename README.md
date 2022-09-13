@@ -25,7 +25,7 @@ jobs:
         # URL to post event payload.  Note that the Ziti service
         # name must match the hostname of the URL (e.g.
         # "someapp.ziti")
-        webhook-url: 'https://someapp.ziti//plugins/github/webhook'
+        webhook-url: https://someapp.ziti/plugins/github/webhook
 
         # Used to create a hash signature of the payload
         # to be set in the X-Hub-Signature HTTP header
@@ -44,6 +44,12 @@ This is a random secret string that is used to provide a data integrity hash the
 
 ```bash
 ruby -rsecurerandom -e 'puts SecureRandom.hex(20)'
+```
+
+Or, generate the random string with Python.
+
+```bash
+python -c "import os, binascii; print(binascii.hexlify(os.urandom(20)).decode('utf-8'))"
 ```
 
 ### Extra Data Input
@@ -79,7 +85,7 @@ gh workflow --repo myorg/myrepo run --ref $(git rev-parse --abbrev-ref HEAD) --r
 ```yaml
         with:
           ziti-id: ${{ secrets.ZITI_WEBHOOK_IDENTITY }}
-          webhook-url: ${{ secrets.ZITI_WEBHOOK_URL }}
+          webhook-url: https://someapp.ziti/plugins/github/webhook
           webhook-secret: ${{ secrets.ZITI_WEBHOOK_SECRET }}
           data: |
             my_release_version=1.2.3
