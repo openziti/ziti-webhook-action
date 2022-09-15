@@ -1,6 +1,6 @@
 {
   "name": "ziti-webhook-action",
-  "version": "0.1.8",
+  "version": "0.2.1",
   "description": "POST a Webhook over a Ziti network",
   "main": "dist/index.js",
   "scripts": {
@@ -28,7 +28,8 @@
   "dependencies": {
     "@actions/core": "^1.2.6",
     "@actions/github": "^4.0.0",
-    "uuid": "^8.3.2",
-    "ziti-sdk-nodejs": "^0.2.5"
+    "@openziti/ziti-sdk-nodejs": "^0.9.3",
+    "@vercel/ncc": "^0.33.4",
+    "uuid": "^8.3.2"
   }
 }

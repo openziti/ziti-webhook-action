@@ -1,5 +1,5 @@
 const fs     = require('fs');
-const ziti   = require('ziti-sdk-nodejs');
+const ziti   = require('@openziti/ziti-sdk-nodejs');
 const core   = require('@actions/core');
 const github = require('@actions/github');
 const crypto = require('crypto');
@@ -86,6 +86,18 @@ const zitiHttpRequestData = async (req, buf) => {
   });
 };
 
+function keyValuePairLinesToObj (string) {
+  var obj = {}; 
+  var stringArray = string.split("\n"); 
+  for(var i = 0; i < stringArray.length; i++){ 
+    var kvp = stringArray[i].split('=');
+    if(kvp[1]){
+      obj[kvp[0]] = kvp[1] 
+    }
+  }
+  return obj;
+}
+
 console.log('Going async...');
 (async function() {
   try {
@@ -93,6 +105,7 @@ console.log('Going async...');
     const zitiId        = core.getInput('ziti-id');
     const webhookUrl    = core.getInput('webhook-url');
     const webhookSecret = core.getInput('webhook-secret');
+    const extraKeyValuePairLines = core.getInput('data');
 
     console.log(`Webhook URL: ${webhookUrl}`);
 
@@ -107,7 +120,8 @@ console.log('Going async...');
 
     // Make sure we have ziti service available
     // Note: ziti-sdk-nodejs (currently) requires service name to match URL host
-    // (TODO: write an issue to change this - no reason that should need to match, and can lead to errors)
+    // TODO: issue to change this - no reason that should need to match, and can lead to errors 
+    //       https://github.com/openziti/ziti-sdk-nodejs/issues/43
     let url = new URL(webhookUrl);
     let serviceName = url.hostname;
     await zitiServiceAvailable(serviceName).catch((err) => {
@@ -115,8 +129,10 @@ console.log('Going async...');
       process.exit(-1);
     });
 
-    // Get the JSON webhook payload for the event that triggered the workflow
-    const payload = JSON.stringify(github.context.payload, undefined, 2)
+    // Get the JSON webhook payload for the event that triggered the workflow and merge with extra data dict from action input
+    var extraData = {'data': keyValuePairLinesToObj(extraKeyValuePairLines)}
+    var payloadData =  Object.assign({}, github.context.payload, extraData);
+    const payload = JSON.stringify(payloadData, undefined, 2)
     var payloadBuf = Buffer.from(payload, 'utf8');
     //console.log(`The event payload: ${payload}`);
 
