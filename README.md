@@ -20,7 +20,7 @@ jobs:
     - uses: openziti/ziti-webhook-action@v2
       with:
         # Identity JSON containing key to access a Ziti network
-        ziti-id: ${{ secrets.ZITI_WEBHOOK_ACTION_ID }}
+        ziti-id: ${{ secrets.ZITI_WEBHOOK_IDENTITY }}
 
         # URL to post event payload.  Note that the Ziti service
         # name must match the hostname of the URL (e.g.
