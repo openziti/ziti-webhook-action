@@ -122,6 +122,7 @@ console.log('Going async...');
     });
 
     // Get the JSON webhook payload for the event that triggered the workflow and merge with extra data dict from action input
+    let url = new URL(webhookUrl);
     var extraData = {'data': keyValuePairLinesToObj(extraKeyValuePairLines)}
     var payloadData =  Object.assign({}, github.context.payload, extraData);
     const payload = JSON.stringify(payloadData, undefined, 2)
