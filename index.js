@@ -21,6 +21,9 @@ const zitiInit = async (zitiFile) => {
   });
 };
 
+// stopped using this function when we switched from a presumed-identical
+// service name == url.hostname to relying upon the SDK to look up the service
+// by URL
 const zitiServiceAvailable = async (service) => {
   return new Promise((resolve, reject) => {
     ziti.ziti_service_available(service, (obj) => {
@@ -115,17 +118,6 @@ console.log('Going async...');
     // First make sure we can initialize Ziti
     await zitiInit(zidFile).catch((err) => {
       core.setFailed(`zitiInit failed: ${err}`);
-      process.exit(-1);
-    });
-
-    // Make sure we have ziti service available
-    // Note: ziti-sdk-nodejs (currently) requires service name to match URL host
-    // TODO: issue to change this - no reason that should need to match, and can lead to errors 
-    //       https://github.com/openziti/ziti-sdk-nodejs/issues/43
-    let url = new URL(webhookUrl);
-    let serviceName = url.hostname;
-    await zitiServiceAvailable(serviceName).catch((err) => {
-      core.setFailed(`zitiServiceAvailable failed: ${err}`);
       process.exit(-1);
     });
 
