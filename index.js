@@ -146,7 +146,7 @@ console.log('Going async...');
       `X-GitHub-Event: ${github.context.eventName}`
     ];
 
-    let req = await zitiHttpRequest(webhookUrl, 'POST',headersArray).catch((err) => {
+    let req = await zitiHttpRequest(webhookUrl, 'POST', headersArray).catch((err) => {
       core.setFailed(`zitiHttpRequest failed: ${err}`);
       process.exit(-1);
     });
