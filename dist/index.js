@@ -26548,7 +26548,6 @@ console.log('Going async...');
     });
 
     // Get the JSON webhook payload for the event that triggered the workflow and merge with extra data dict from action input
-    let url = new URL(webhookUrl);
     var extraData = {'data': keyValuePairLinesToObj(extraKeyValuePairLines)}
     var payloadData =  Object.assign({}, github.context.payload, extraData);
     const payload = JSON.stringify(payloadData, undefined, 2)
@@ -26573,6 +26572,7 @@ console.log('Going async...');
       `X-GitHub-Event: ${github.context.eventName}`
     ];
 
+    console.log(`webhookUrl: ${webhookUrl}\nheadersArray: ${headersArray.length}`)
     let req = await zitiHttpRequest(webhookUrl, 'POST', headersArray).catch((err) => {
       core.setFailed(`zitiHttpRequest failed: ${err}`);
       process.exit(-1);
