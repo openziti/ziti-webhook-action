@@ -40,6 +40,7 @@ const zitiServiceAvailable = async (service) => {
 
 const zitiHttpRequest = async (url, method, headers) => {
   return new Promise((resolve) => {
+    console.log(`args: ${arguments.length}`)
     ziti.Ziti_http_request(
       url, 
       method,
