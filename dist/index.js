@@ -26466,6 +26466,7 @@ const zitiServiceAvailable = async (service) => {
 
 const zitiHttpRequest = async (url, method, path, headers) => {
   return new Promise((resolve) => {
+    console.log(`path: ${path}`)
     ziti.httpRequest(
       url, 
       method,
