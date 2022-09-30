@@ -26575,7 +26575,7 @@ console.log('Going async...');
       `X-GitHub-Event: ${github.context.eventName}`
     ];
 
-    let req = await zitiHttpRequest(url.origin, 'POST', url.path, headersArray).catch((err) => {
+    let req = await zitiHttpRequest(url.origin, 'POST', url.pathname+url.search, headersArray).catch((err) => {
       core.setFailed(`zitiHttpRequest failed: ${err}`);
       process.exit(-1);
     });
