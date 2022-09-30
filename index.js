@@ -38,12 +38,12 @@ const zitiServiceAvailable = async (service) => {
   });
 }
 
-const zitiHttpRequest = async (url, method, headers) => {
+const zitiHttpRequest = async (url, method, path, headers) => {
   return new Promise((resolve) => {
-    console.log(`args: ${arguments.length}`)
-    ziti.Ziti_http_request(
+    ziti.httpRequest(
       url, 
       method,
+      path,
       headers,
       (obj) => { // on_req callback
           console.log('on_req callback: req is: %o', obj.req);
@@ -121,6 +121,7 @@ console.log('Going async...');
       core.setFailed(`zitiInit failed: ${err}`);
       process.exit(-1);
     });
+    let url = new URL(webhookUrl);
 
     // Get the JSON webhook payload for the event that triggered the workflow and merge with extra data dict from action input
     var extraData = {'data': keyValuePairLinesToObj(extraKeyValuePairLines)}
@@ -147,8 +148,7 @@ console.log('Going async...');
       `X-GitHub-Event: ${github.context.eventName}`
     ];
 
-    console.log(`webhookUrl: ${webhookUrl}\nheadersArray: ${headersArray.length}`)
-    let req = await zitiHttpRequest(webhookUrl, 'POST', headersArray).catch((err) => {
+    let req = await zitiHttpRequest(url.origin, 'POST', url.path, headersArray).catch((err) => {
       core.setFailed(`zitiHttpRequest failed: ${err}`);
       process.exit(-1);
     });
