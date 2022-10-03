@@ -12,7 +12,9 @@ const zitiInit = async (zitiFile) => {
         if (init_rc < 0) {
             return reject(`init_rc = ${init_rc}`);
         }
-        return resolve();
+        setTimeout( () => {
+            return resolve();
+        }, 1000);
     });
 
     if (rc < 0) {

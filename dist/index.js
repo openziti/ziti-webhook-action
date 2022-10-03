@@ -1,13 +1,6 @@
 /******/ (() => { // webpackBootstrap
 /******/ 	var __webpack_modules__ = ({
 
-/***/ 9289:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-module.exports = require(__nccwpck_require__.ab + "build/Release/node-v83-linux-x64/ziti_sdk_nodejs.node")
-
-/***/ }),
-
 /***/ 7351:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -7109,9 +7102,9 @@ if (typeof require.context == 'function') {
 
     const binary = __nccwpck_require__(5128);
     const path = __nccwpck_require__(1017)
-    const binding_path = __nccwpck_require__.ab + "build/Release/node-v83-linux-x64/ziti_sdk_nodejs.node";
+    const binding_path = binary.find(path.resolve(path.join(__dirname,'../package.json')), {debug: false});
 
-    binding = __nccwpck_require__(9289);
+    binding = __nccwpck_require__(3314);
     
 }
 
@@ -26183,6 +26176,14 @@ try {
 
 /***/ }),
 
+/***/ 3314:
+/***/ ((module) => {
+
+module.exports = eval("require")("/home/kbingham/Sites/netfoundry/github/ziti-webhook-action/node_modules/@openziti/ziti-sdk-nodejs/build/Release/node-v93-linux-x64/ziti_sdk_nodejs.node");
+
+
+/***/ }),
+
 /***/ 6645:
 /***/ ((module) => {
 
@@ -26438,7 +26439,9 @@ const zitiInit = async (zitiFile) => {
         if (init_rc < 0) {
             return reject(`init_rc = ${init_rc}`);
         }
-        return resolve();
+        setTimeout( () => {
+            return resolve();
+        }, 1000);
     });
 
     if (rc < 0) {
