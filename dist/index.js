@@ -6627,7 +6627,7 @@ const on_resp_data = ( obj ) => {
 
 const httpRequest = ( url, method, path, headers, on_req_cb, on_resp_cb, on_resp_data_cb ) => {
 
-    console.log('httpRequest entered: ', url, method, headers);
+    console.log(`httpRequest entered: httpOrigin|serviceName: "${url}", method: "${method}", path: "${path}", headers: "${headers}"`);
 
     let _on_req_cb;
     let _on_resp_cb;
@@ -6747,11 +6747,8 @@ const init = ( identityPath ) => {
 
       let rc = ziti.ziti_init( identityPath, ( result ) => {
 
-        setTimeout( () => {
-
           return resolve( result );
         
-        }, 1000);
       });
 
       if (rc < 0) {
