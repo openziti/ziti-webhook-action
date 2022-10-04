@@ -21,6 +21,9 @@ const zitiInit = async (zitiFile) => {
   });
 };
 
+// stopped using this function when we switched from a presumed-identical
+// service name == url.hostname to relying upon the SDK to look up the service
+// by URL
 const zitiServiceAvailable = async (service) => {
   return new Promise((resolve, reject) => {
     ziti.ziti_service_available(service, (obj) => {
@@ -35,11 +38,13 @@ const zitiServiceAvailable = async (service) => {
   });
 }
 
-const zitiHttpRequest = async (url, method, headers) => {
+const zitiHttpRequest = async (url, method, path, headers) => {
   return new Promise((resolve) => {
-    ziti.Ziti_http_request(
+    console.log(`path: ${path}`)
+    ziti.httpRequest(
       url, 
       method,
+      path,
       headers,
       (obj) => { // on_req callback
           console.log('on_req callback: req is: %o', obj.req);
@@ -117,17 +122,7 @@ console.log('Going async...');
       core.setFailed(`zitiInit failed: ${err}`);
       process.exit(-1);
     });
-
-    // Make sure we have ziti service available
-    // Note: ziti-sdk-nodejs (currently) requires service name to match URL host
-    // TODO: issue to change this - no reason that should need to match, and can lead to errors 
-    //       https://github.com/openziti/ziti-sdk-nodejs/issues/43
     let url = new URL(webhookUrl);
-    let serviceName = url.hostname;
-    await zitiServiceAvailable(serviceName).catch((err) => {
-      core.setFailed(`zitiServiceAvailable failed: ${err}`);
-      process.exit(-1);
-    });
 
     // Get the JSON webhook payload for the event that triggered the workflow and merge with extra data dict from action input
     var extraData = {'data': keyValuePairLinesToObj(extraKeyValuePairLines)}
@@ -154,7 +149,7 @@ console.log('Going async...');
       `X-GitHub-Event: ${github.context.eventName}`
     ];
 
-    let req = await zitiHttpRequest(webhookUrl, 'POST',headersArray).catch((err) => {
+    let req = await zitiHttpRequest(url.origin, 'POST', url.pathname+url.search, headersArray).catch((err) => {
       core.setFailed(`zitiHttpRequest failed: ${err}`);
       process.exit(-1);
     });
